@@ -9,6 +9,20 @@ xiaozhi:
   base_url: "wss://api.xiaozhi.me/mcp/"
   # 1006 空闲超时后的重连延迟（ms），默认 3s
   # reconnect_delay: 3000
+  # 重连最大延迟（ms），默认 60s
+  # reconnect_max_delay: 60000
+  # 是否启用 WebSocket 协议层 ping/pong 心跳保活（默认 true）
+  # 注意：如果服务端不支持客户端 ping，会自动降级
+  # enable_heartbeat: true
+  # 心跳间隔（ms），默认 25s（需小于服务端超时时间）
+  # heartbeat_interval: 25000
+  # 心跳超时（ms），默认 10s，超时未收到 pong 则认为连接已断开
+  # heartbeat_timeout: 10000
+  # 是否启用 listTools 应用层保活（默认 false）
+  # 当 ping 不可用时，通过定期调用 tools/list 维持连接活性
+  # enable_listtools_keepalive: false
+  # 消息队列最大长度，断开期间缓存的消息数上限（默认 100）
+  # message_queue_max: 100
   #
   # 如需要完整 URL 覆盖（不推荐，token 会写在配置里），可取消下一行注释：
   # url: "wss://api.xiaozhi.me/mcp/?token=YOUR_TOKEN"

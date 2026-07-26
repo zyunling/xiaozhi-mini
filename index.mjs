@@ -53,6 +53,12 @@ try {
 }
 
 const RECONNECT_DELAY = config.xiaozhi?.reconnect_delay || 3000;
+const RECONNECT_MAX_DELAY = config.xiaozhi?.reconnect_max_delay || 60000;
+const HEARTBEAT_INTERVAL = config.xiaozhi?.heartbeat_interval || 25000;
+const HEARTBEAT_TIMEOUT = config.xiaozhi?.heartbeat_timeout || 10000;
+const MESSAGE_QUEUE_MAX_SIZE = config.xiaozhi?.message_queue_max || 100;
+const ENABLE_HEARTBEAT = config.xiaozhi?.enable_heartbeat !== false;
+const ENABLE_LISTTOOLS_KEEPALIVE = config.xiaozhi?.enable_listtools_keepalive === true;
 
 // ── 组装小智 WebSocket URL ─────────────────────────────────
 // 优先级：
@@ -194,21 +200,50 @@ function aggregateTools() {
 
 // ── 3. 连小智 WebSocket ───────────────────────────────────
 //
-// 小智 MCP endpoint 会在空闲约 40-60s 后以 1006 断开连接。
-// 该 endpoint 不支持客户端主动发送任何数据（协议层 Ping 帧和
-// JSON 心跳消息都会被服务端关闭连接），因此无法从客户端侧保活。
-//
-// 策略：1006 走固定短延迟快速重连（对用户透明），
-// 其他 close code 走指数退避避免频繁重试。
+// 连接优化策略（参考 mcphub 及其他小智生态项目）：
+// 1. WebSocket 协议层 Ping/Pong 心跳保活（默认开启）
+// 2. 可选 listTools 应用层保活（兼容不支持 ping 的服务端）
+// 3. 指数退避 + 随机抖动重连，避免惊群效应
+// 4. 消息队列：断开期间缓存消息，重连后发送
+// 5. 1006 空闲超时使用更短的延迟快速重连
 
 let ws = null;
 let reconnectDelay = RECONNECT_DELAY;
 let isClosed = false;
 let reconnectTimer = null;
+let heartbeatTimer = null;
+let heartbeatTimeoutTimer = null;
+let pingSupported = null;
+let lastMessageTime = 0;
+const messageQueue = [];
+let consecutive1006Count = 0;
 
-function wsSend(data) {
+function now() {
+  return Date.now();
+}
+
+function enqueueMessage(data) {
+  if (messageQueue.length >= MESSAGE_QUEUE_MAX_SIZE) {
+    const dropped = messageQueue.shift();
+    console.warn(`⚠️  消息队列已满，丢弃最旧消息: ${dropped?.id || 'unknown'}`);
+  }
+  messageQueue.push(data);
+}
+
+function flushMessageQueue() {
+  if (messageQueue.length === 0) return;
+  console.log(`📤 重连后发送 ${messageQueue.length} 条缓存消息`);
+  while (messageQueue.length > 0) {
+    const msg = messageQueue.shift();
+    if (!wsSendImmediate(msg)) {
+      messageQueue.unshift(msg);
+      break;
+    }
+  }
+}
+
+function wsSendImmediate(data) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn('⚠️  WebSocket 未连接，丢弃消息');
     return false;
   }
   try {
@@ -220,7 +255,65 @@ function wsSend(data) {
   }
 }
 
+function wsSend(data, { queue = true } = {}) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    return wsSendImmediate(data);
+  }
+  if (queue) {
+    enqueueMessage(data);
+    console.log('📥 连接未就绪，消息已加入队列');
+    return false;
+  }
+  console.warn('⚠️  WebSocket 未连接，丢弃消息');
+  return false;
+}
+
+function startHeartbeat() {
+  if (!ENABLE_HEARTBEAT) return;
+  stopHeartbeat();
+
+  heartbeatTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    if (pingSupported === null || pingSupported === true) {
+      try {
+        ws.ping();
+        if (HEARTBEAT_TIMEOUT > 0) {
+          heartbeatTimeoutTimer = setTimeout(() => {
+            console.warn('⚠️  心跳超时，连接可能已断开');
+            if (ws) {
+              ws.terminate();
+            }
+          }, HEARTBEAT_TIMEOUT);
+        }
+      } catch (err) {
+        console.warn('⚠️  发送 ping 失败:', maskUrl(err.message));
+        pingSupported = false;
+      }
+    }
+
+    if (ENABLE_LISTTOOLS_KEEPALIVE && (!ENABLE_HEARTBEAT || pingSupported === false)) {
+      if (now() - lastMessageTime > HEARTBEAT_INTERVAL) {
+        console.log('💓 listTools 保活探测');
+        wsSendImmediate({ jsonrpc: '2.0', method: 'tools/list', id: `keepalive-${now()}` });
+      }
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  if (heartbeatTimeoutTimer) {
+    clearTimeout(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = null;
+  }
+}
+
 function cleanupWs() {
+  stopHeartbeat();
   if (ws) {
     try {
       ws.removeAllListeners();
@@ -230,60 +323,80 @@ function cleanupWs() {
   }
 }
 
-function connectXiaozhi() {
-  isClosed = false;
-  cleanupWs();
-  console.log(`🔗 连接小智: ${maskUrl(XIAOZHI_URL)}`);
+function jitter(base) {
+  return Math.floor(base * (0.8 + Math.random() * 0.4));
+}
 
-  ws = new WebSocket(XIAOZHI_URL);
+function scheduleReconnect(code) {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+  }
 
-  ws.on('open', () => {
-    console.log('🟢 小智 WebSocket 已连接');
-    reconnectDelay = RECONNECT_DELAY;
-  });
+  let delay;
+  if (code === 1006) {
+    consecutive1006Count++;
+    if (consecutive1006Count <= 3) {
+      delay = RECONNECT_DELAY;
+    } else {
+      delay = Math.min(RECONNECT_DELAY * Math.pow(1.5, consecutive1006Count - 3), RECONNECT_MAX_DELAY);
+    }
+    console.log(`🔄 空闲超时(${code})，连续 ${consecutive1006Count} 次，${Math.round(delay / 1000)}s 后重连...`);
+  } else {
+    consecutive1006Count = 0;
+    delay = reconnectDelay;
+    console.log(`🔴 小智断开(${code})，${Math.round(delay / 1000)}s 后重连...`);
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY);
+  }
 
-  ws.on('message', async (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); }
-    catch { return; }
+  delay = jitter(delay);
+  reconnectTimer = setTimeout(connectXiaozhi, delay);
+}
 
-    if (msg.method === 'initialize') {
-      wsSend({
-        jsonrpc: '2.0',
-        result: {
-          protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'xiaozhi-mini', version: VERSION }
-        },
-        id: msg.id
-      });
+function handleIncomingMessage(raw) {
+  lastMessageTime = now();
+
+  let msg;
+  try { msg = JSON.parse(raw.toString()); }
+  catch { return; }
+
+  if (msg.method === 'initialize') {
+    wsSend({
+      jsonrpc: '2.0',
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'xiaozhi-mini', version: VERSION }
+      },
+      id: msg.id
+    });
+    return;
+  }
+
+  if (msg.method === 'tools/list') {
+    const tools = aggregateTools();
+    wsSend({ jsonrpc: '2.0', result: { tools }, id: msg.id });
+    console.log(`📤 推送 ${tools.length} 个工具给小智`);
+    return;
+  }
+
+  if (msg.method === 'tools/call') {
+    const toolName = msg.params?.name || '';
+    console.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
+    const underscoreIdx = toolName.indexOf('_');
+    if (underscoreIdx <= 0) {
+      wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
+      return;
+    }
+    const prefix = toolName.substring(0, underscoreIdx);
+    const realName = toolName.substring(underscoreIdx + 1);
+    const up = upstreams.get(prefix);
+
+    if (!up) {
+      wsSend({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id });
       return;
     }
 
-    if (msg.method === 'tools/list') {
-      const tools = aggregateTools();
-      wsSend({ jsonrpc: '2.0', result: { tools }, id: msg.id });
-      console.log(`📤 推送 ${tools.length} 个工具给小智`);
-      return;
-    }
-
-    if (msg.method === 'tools/call') {
-      const toolName = msg.params?.name || '';
-      console.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
-      const underscoreIdx = toolName.indexOf('_');
-      if (underscoreIdx <= 0) {
-        wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
-        return;
-      }
-      const prefix = toolName.substring(0, underscoreIdx);
-      const realName = toolName.substring(underscoreIdx + 1);
-      const up = upstreams.get(prefix);
-
-      if (!up) {
-        wsSend({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id });
-        return;
-      }
-
+    (async () => {
       try {
         let result;
         if (up.type === 'streamable-http') {
@@ -303,27 +416,67 @@ function connectXiaozhi() {
         console.error(`❌ ${toolName} 调用失败:`, maskUrl(err));
         wsSend({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id });
       }
-      return;
-    }
+    })();
+    return;
+  }
 
-    // 记录所有未识别的 method，帮助排查小智发了什么请求
-    console.log(`❓ 未知请求: method=${msg.method}`, JSON.stringify(msg).substring(0, 200));
+  if (msg.id && String(msg.id).startsWith('keepalive-')) {
+    console.log('💓 保活响应正常');
+    return;
+  }
+
+  console.log(`❓ 未知请求: method=${msg.method}`, JSON.stringify(msg).substring(0, 200));
+}
+
+function connectXiaozhi() {
+  isClosed = false;
+  cleanupWs();
+  console.log(`🔗 连接小智: ${maskUrl(XIAOZHI_URL)}`);
+  if (ENABLE_HEARTBEAT) {
+    console.log(`💓 心跳保活已启用，间隔 ${HEARTBEAT_INTERVAL / 1000}s，超时 ${HEARTBEAT_TIMEOUT / 1000}s`);
+  }
+  if (ENABLE_LISTTOOLS_KEEPALIVE) {
+    console.log(`📋 listTools 保活已启用`);
+  }
+
+  ws = new WebSocket(XIAOZHI_URL, {
+    perMessageDeflate: false,
+    handshakeTimeout: 10000,
+  });
+
+  ws.on('open', () => {
+    console.log('🟢 小智 WebSocket 已连接');
+    lastMessageTime = now();
+    reconnectDelay = RECONNECT_DELAY;
+    consecutive1006Count = 0;
+    pingSupported = null;
+    startHeartbeat();
+    flushMessageQueue();
+  });
+
+  ws.on('message', handleIncomingMessage);
+
+  ws.on('pong', () => {
+    lastMessageTime = now();
+    if (heartbeatTimeoutTimer) {
+      clearTimeout(heartbeatTimeoutTimer);
+      heartbeatTimeoutTimer = null;
+    }
+    if (pingSupported === null) {
+      pingSupported = true;
+      console.log('✅ WebSocket ping/pong 心跳可用');
+    }
+  });
+
+  ws.on('ping', () => {
+    lastMessageTime = now();
   });
 
   ws.on('close', (code) => {
     if (isClosed) return;
     isClosed = true;
-
-    if (code === 1006) {
-      // 1006 = 服务端空闲超时，正常行为，固定延迟快速重连
-      console.log(`🔄 空闲超时(${code})，${RECONNECT_DELAY / 1000}s 后重连...`);
-      reconnectTimer = setTimeout(connectXiaozhi, RECONNECT_DELAY);
-    } else {
-      // 其他 close code：指数退避（可能是真实错误，避免频繁重试）
-      console.log(`🔴 小智断开(${code})，${reconnectDelay / 1000}s 后重连...`);
-      reconnectTimer = setTimeout(connectXiaozhi, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, 60000);
-    }
+    stopHeartbeat();
+    scheduleReconnect(code);
   });
 
   ws.on('error', (err) => {
