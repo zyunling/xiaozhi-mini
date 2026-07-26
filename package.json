@@ -1,0 +1,10 @@
+{
+  "name": "xiaozhi-mini",
+  "version": "2.2.0",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "@modelcontextprotocol/sdk": "1.0.0",
+    "yaml": "^2.5.0"
+  }
+}

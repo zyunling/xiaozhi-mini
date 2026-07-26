@@ -1,0 +1,50 @@
+# ============================================================
+# xiaozhi-mini v2 配置
+# 改完这个文件后 docker restart xiaozhi-mini 生效
+# ============================================================
+
+xiaozhi:
+  url: "wss://api.xiaozhi.me/mcp/?token=REPLACE_WITH_YOUR_TOKEN"
+  ping_interval: 15000
+  ping_timeout: 8000
+
+upstreams:
+  # ── HA-MCP（你的空调/灯光/传感器）──────────────────────
+  ha:
+    type: streamable-http
+    url: "http://192.168.199.8:9583/REPLACE_WITH_YOUR_TOKEN"
+    headers:
+      Accept: "application/json, text/event-stream"
+
+  # ── 下面是示例，取消注释就能用 ──────────────────────────
+
+  memory:
+    type: stdio
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-memory"]
+    env:
+      MEMORY_FILE_PATH: /workspaces/memory.jsonl
+
+  # 示例1：Tavily 搜索（需要 API Key）
+  # tavily:
+  #   type: streamable-http
+  #   url: "https://api.tavily.com/mcp"
+  #   headers:
+  #     Authorization: "Bearer ${TAVILY_API_KEY}"
+
+  # 示例2：Sequential Thinking（本地 stdio 进程）
+  # sequential:
+  #   type: stdio
+  #   command: "npx"
+  #   args: ["-y", "@anthropic-ai/sequential-thinking"]
+
+  # 示例3：文件系统（本地 stdio 进程）
+  # filesystem:
+  #   type: stdio
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+  # 示例4：高德地图（需要 API Key）
+  # amap:
+  #   type: streamable-http
+  #   url: "https://mcp.amap.com/mcp?key=YOUR_AMAP_KEY"
