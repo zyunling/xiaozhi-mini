@@ -1,5 +1,5 @@
 /**
- * xiaozhi-mini v2.3
+ * xiaozhi-mini v2.4
  * 轻量 MCP 聚合桥：小智 wss(MCP) ↔ N 个 upstream MCP Server
  * streamable-http: 自己 fetch + SSE 解析（避开 SDK 路径问题）
  * stdio: 仍用 SDK StdioClientTransport（路径稳定）
@@ -13,13 +13,64 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const config = yaml.parse(fs.readFileSync(path.join(__dirname, 'config.yaml'), 'utf8'));
 
-const XIAOZHI_URL = config.xiaozhi.url;
-const RECONNECT_DELAY = config.xiaozhi.reconnect_delay || 3000;
+const VERSION = '2.4.0';
 
-if (!XIAOZHI_URL || XIAOZHI_URL.includes('YOUR_TOKEN')) {
-  console.error('❌ 请先在 config.yaml 里填好 xiaozhi.url');
+// ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
+function loadEnvFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) {
+        process.env[key] = val;
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️  读取 .env 文件失败:', err.message);
+  }
+}
+
+loadEnvFile(path.join(__dirname, '.env'));
+
+// ── 加载配置 ───────────────────────────────────────────────
+let config;
+try {
+  config = yaml.parse(fs.readFileSync(path.join(__dirname, 'config.yaml'), 'utf8'));
+} catch (err) {
+  console.error('❌ config.yaml 解析失败:', err.message);
+  process.exit(1);
+}
+
+const RECONNECT_DELAY = config.xiaozhi?.reconnect_delay || 3000;
+
+// ── 组装小智 WebSocket URL ─────────────────────────────────
+// 优先级：
+// 1. config.xiaozhi.url 中有完整 URL（含 token）且不是占位符 → 直接用
+// 2. 从环境变量 XIAOZHI_TOKEN 读取 token，拼接 base URL
+let XIAOZHI_URL = config.xiaozhi?.url || '';
+const XIAOZHI_TOKEN = process.env.XIAOZHI_TOKEN || '';
+
+if (XIAOZHI_TOKEN && XIAOZHI_TOKEN !== 'REPLACE_WITH_YOUR_TOKEN') {
+  const baseUrl = config.xiaozhi?.base_url || 'wss://api.xiaozhi.me/mcp/';
+  const separator = baseUrl.includes('?') ? '&' : '?';
+  XIAOZHI_URL = `${baseUrl}${separator}token=${XIAOZHI_TOKEN}`;
+}
+
+if (!XIAOZHI_URL || XIAOZHI_URL.includes('REPLACE_WITH_YOUR_TOKEN') || XIAOZHI_URL.includes('YOUR_TOKEN')) {
+  console.error('❌ 请先配置小智 token：');
+  console.error('   方式一：复制 .env.example 为 .env，填入 XIAOZHI_TOKEN');
+  console.error('   方式二：在环境变量中设置 XIAOZHI_TOKEN');
   process.exit(1);
 }
 
@@ -36,20 +87,28 @@ function maskUrl(s) {
     .replace(/(\/\d{3,5}\/)[A-Za-z0-9_\-]{8,}/gi, '$1***');
 }
 
-// ── 工具：解析 SSE 流，取出最后一个 JSON-RPC 响应 ─────────
+// ── 工具：解析 SSE 流，取出 JSON-RPC 响应 ─────────────────
+// 兼容两种情况：1) 单个 JSON 响应  2) SSE 流式响应（取完整 JSON）
 async function parseSSEResponse(response) {
   const text = await response.text();
   const lines = text.split('\n');
-  let dataLine = null;
+  const dataLines = [];
   for (const line of lines) {
     if (line.startsWith('data: ')) {
-      dataLine = line.slice(6);
+      const data = line.slice(6);
+      if (data === '[DONE]') break;
+      dataLines.push(data);
     }
   }
-  if (!dataLine) {
+  if (dataLines.length === 0) {
     return JSON.parse(text);
   }
-  return JSON.parse(dataLine.trim());
+  const lastData = dataLines[dataLines.length - 1];
+  try {
+    return JSON.parse(lastData.trim());
+  } catch {
+    return JSON.parse(dataLines.join('').trim());
+  }
 }
 
 // ── 工具：对 streamable-http upstream 做一次 JSON-RPC POST ──
@@ -71,7 +130,12 @@ async function initUpstreams() {
   for (const [name, cfg] of Object.entries(config.upstreams || {})) {
     try {
       if (cfg.type === 'streamable-http') {
-        const listResp = await postHA({ url: cfg.url, headers: cfg.headers || {} }, 'tools/list', {}, 'init-list');
+        const listResp = await postHA(
+          { url: cfg.url, headers: cfg.headers || {} },
+          'tools/list',
+          {},
+          'init-list'
+        );
         const tools = listResp.result?.tools || [];
         upstreams.set(name, { type: 'streamable-http', url: cfg.url, headers: cfg.headers || {}, tools });
         console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
@@ -80,11 +144,14 @@ async function initUpstreams() {
         const transport = new StdioClientTransport({
           command: cfg.command, args: cfg.args || [], env: { ...process.env, ...(cfg.env || {}) }
         });
-        const client = new Client({ name: `mini-${name}`, version: '2.3.0' }, { capabilities: {} });
+        const client = new Client(
+          { name: `mini-${name}`, version: VERSION },
+          { capabilities: {} }
+        );
         await client.connect(transport);
         const result = await client.listTools();
         const tools = result.tools || [];
-        upstreams.set(name, { type: 'stdio', client, tools });
+        upstreams.set(name, { type: 'stdio', client, transport, tools });
         console.log(`✅ [${name}] stdio: ${tools.length} 个工具 (PID: ${transport._process?.pid})`);
       } else {
         console.warn(`⚠️  [${name}] 未知类型: ${maskUrl(cfg.type)}，跳过`);
@@ -139,8 +206,33 @@ let reconnectDelay = RECONNECT_DELAY;
 let isClosed = false;
 let reconnectTimer = null;
 
+function wsSend(data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn('⚠️  WebSocket 未连接，丢弃消息');
+    return false;
+  }
+  try {
+    ws.send(JSON.stringify(data));
+    return true;
+  } catch (err) {
+    console.error('❌ WebSocket 发送失败:', maskUrl(err.message));
+    return false;
+  }
+}
+
+function cleanupWs() {
+  if (ws) {
+    try {
+      ws.removeAllListeners();
+      ws.close();
+    } catch (_) { /* ignore */ }
+    ws = null;
+  }
+}
+
 function connectXiaozhi() {
   isClosed = false;
+  cleanupWs();
   console.log(`🔗 连接小智: ${maskUrl(XIAOZHI_URL)}`);
 
   ws = new WebSocket(XIAOZHI_URL);
@@ -156,21 +248,21 @@ function connectXiaozhi() {
     catch { return; }
 
     if (msg.method === 'initialize') {
-      ws.send(JSON.stringify({
+      wsSend({
         jsonrpc: '2.0',
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'xiaozhi-mini', version: '2.3.0' }
+          serverInfo: { name: 'xiaozhi-mini', version: VERSION }
         },
         id: msg.id
-      }));
+      });
       return;
     }
 
     if (msg.method === 'tools/list') {
       const tools = aggregateTools();
-      ws.send(JSON.stringify({ jsonrpc: '2.0', result: { tools }, id: msg.id }));
+      wsSend({ jsonrpc: '2.0', result: { tools }, id: msg.id });
       console.log(`📤 推送 ${tools.length} 个工具给小智`);
       return;
     }
@@ -180,7 +272,7 @@ function connectXiaozhi() {
       console.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
       const underscoreIdx = toolName.indexOf('_');
       if (underscoreIdx <= 0) {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id }));
+        wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
         return;
       }
       const prefix = toolName.substring(0, underscoreIdx);
@@ -188,24 +280,28 @@ function connectXiaozhi() {
       const up = upstreams.get(prefix);
 
       if (!up) {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id }));
+        wsSend({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id });
         return;
       }
 
       try {
-        let response;
+        let result;
         if (up.type === 'streamable-http') {
-          response = await postHA(up, 'tools/call', { name: realName, arguments: msg.params.arguments || {} }, msg.id);
-          if (response.id !== undefined) response.id = msg.id;
+          const response = await postHA(
+            up,
+            'tools/call',
+            { name: realName, arguments: msg.params.arguments || {} },
+            msg.id
+          );
+          result = response.result;
         } else if (up.type === 'stdio') {
-          const result = await up.client.callTool({ name: realName, arguments: msg.params.arguments || {} });
-          response = { jsonrpc: '2.0', result, id: msg.id };
+          result = await up.client.callTool({ name: realName, arguments: msg.params.arguments || {} });
         }
-        ws.send(JSON.stringify(response));
+        wsSend({ jsonrpc: '2.0', result, id: msg.id });
         console.log(`🔧 ${toolName} → ok`);
       } catch (err) {
         console.error(`❌ ${toolName} 调用失败:`, maskUrl(err));
-        ws.send(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id }));
+        wsSend({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id });
       }
       return;
     }
@@ -220,11 +316,11 @@ function connectXiaozhi() {
 
     if (code === 1006) {
       // 1006 = 服务端空闲超时，正常行为，固定延迟快速重连
-      console.log(`🔄 空闲超时(${code})，${RECONNECT_DELAY/1000}s 后重连...`);
+      console.log(`🔄 空闲超时(${code})，${RECONNECT_DELAY / 1000}s 后重连...`);
       reconnectTimer = setTimeout(connectXiaozhi, RECONNECT_DELAY);
     } else {
       // 其他 close code：指数退避（可能是真实错误，避免频繁重试）
-      console.log(`🔴 小智断开(${code})，${reconnectDelay/1000}s 后重连...`);
+      console.log(`🔴 小智断开(${code})，${reconnectDelay / 1000}s 后重连...`);
       reconnectTimer = setTimeout(connectXiaozhi, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 60000);
     }
@@ -236,11 +332,26 @@ function connectXiaozhi() {
 }
 
 // ── 4. 优雅退出 ────────────────────────────────────────────
-process.on('SIGTERM', () => { clearTimeout(reconnectTimer); ws?.close(); process.exit(0); });
-process.on('SIGINT',  () => { clearTimeout(reconnectTimer); ws?.close(); process.exit(0); });
+function gracefulShutdown(signal) {
+  console.log(`\n收到 ${signal}，正在退出...`);
+  clearTimeout(reconnectTimer);
+  cleanupWs();
+  // 关闭所有 stdio upstream
+  for (const [name, up] of upstreams) {
+    if (up.type === 'stdio' && up.transport) {
+      try {
+        up.transport.close();
+      } catch (_) { /* ignore */ }
+    }
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ── 启动 ───────────────────────────────────────────────────
-console.log('🚀 xiaozhi-mini v2.3 启动中...');
+console.log(`🚀 xiaozhi-mini v${VERSION} 启动中...`);
 await initUpstreams();
 const totalTools = [...upstreams.values()].reduce((sum, u) => sum + u.tools.length, 0);
 const errCount = [...upstreams.values()].filter(u => u.error).length;

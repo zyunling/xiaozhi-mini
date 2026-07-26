@@ -1,12 +1,17 @@
 # ============================================================
-# xiaozhi-mini v2 配置
+# xiaozhi-mini v2.4 配置
 # 改完这个文件后 docker restart xiaozhi-mini 生效
+# token 请在 .env 文件中配置（XIAOZHI_TOKEN=xxx）
 # ============================================================
 
 xiaozhi:
-  url: "wss://api.xiaozhi.me/mcp/?token=REPLACE_WITH_YOUR_TOKEN"
+  # 小智 MCP 服务 base URL（一般不用改）
+  base_url: "wss://api.xiaozhi.me/mcp/"
   # 1006 空闲超时后的重连延迟（ms），默认 3s
   # reconnect_delay: 3000
+  #
+  # 如需要完整 URL 覆盖（不推荐，token 会写在配置里），可取消下一行注释：
+  # url: "wss://api.xiaozhi.me/mcp/?token=YOUR_TOKEN"
 
 upstreams:
   # ── HA-MCP（你的空调/灯光/传感器）──────────────────────

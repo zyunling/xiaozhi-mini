@@ -4,6 +4,10 @@ services:
     container_name: xiaozhi-mini
     restart: unless-stopped
 
+    # 从 .env 文件读取环境变量（含小智 token）
+    env_file:
+      - .env
+
     # 挂载配置（改 config.yaml 后 restart 生效）
     volumes:
       - ./config.yaml:/app/config.yaml:ro
