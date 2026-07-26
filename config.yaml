@@ -5,8 +5,8 @@
 
 xiaozhi:
   url: "wss://api.xiaozhi.me/mcp/?token=REPLACE_WITH_YOUR_TOKEN"
-  ping_interval: 15000
-  ping_timeout: 8000
+  # 1006 空闲超时后的重连延迟（ms），默认 3s
+  # reconnect_delay: 3000
 
 upstreams:
   # ── HA-MCP（你的空调/灯光/传感器）──────────────────────
