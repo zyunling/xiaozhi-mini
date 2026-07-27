@@ -52,13 +52,15 @@ try {
   process.exit(1);
 }
 
-const RECONNECT_DELAY = config.xiaozhi?.reconnect_delay || 3000;
+const RECONNECT_DELAY = config.xiaozhi?.reconnect_delay || 2000;
 const RECONNECT_MAX_DELAY = config.xiaozhi?.reconnect_max_delay || 60000;
-const HEARTBEAT_INTERVAL = config.xiaozhi?.heartbeat_interval || 25000;
-const HEARTBEAT_TIMEOUT = config.xiaozhi?.heartbeat_timeout || 10000;
 const MESSAGE_QUEUE_MAX_SIZE = config.xiaozhi?.message_queue_max || 100;
-const ENABLE_HEARTBEAT = config.xiaozhi?.enable_heartbeat !== false;
-const ENABLE_LISTTOOLS_KEEPALIVE = config.xiaozhi?.enable_listtools_keepalive === true;
+const AGGRESSIVE_RECONNECT = config.xiaozhi?.aggressive_reconnect !== false;
+const MAX_QUICK_RECONNECT = config.xiaozhi?.max_quick_reconnect || 10;
+const INFINITE_RECONNECT_DELAY = config.xiaozhi?.infinite_reconnect_delay || 1800000;
+const MAX_INFINITE_RETRIES = config.xiaozhi?.max_infinite_retries || 48;
+const SLEEP_THRESHOLD = config.xiaozhi?.sleep_threshold || 12;
+const SLEEP_INTERVAL = config.xiaozhi?.sleep_interval || 7200000;
 
 // ── 组装小智 WebSocket URL ─────────────────────────────────
 // 优先级：
@@ -208,15 +210,14 @@ function aggregateTools() {
 // 5. 1006 空闲超时使用更短的延迟快速重连
 
 let ws = null;
-let reconnectDelay = RECONNECT_DELAY;
 let isClosed = false;
 let reconnectTimer = null;
-let heartbeatTimer = null;
-let heartbeatTimeoutTimer = null;
-let pingSupported = null;
-let lastMessageTime = 0;
 const messageQueue = [];
-let consecutive1006Count = 0;
+
+let quickReconnectAttempts = 0;
+let isInInfiniteReconnectMode = false;
+let infiniteRetryCount = 0;
+let isInSleepMode = false;
 
 function now() {
   return Date.now();
@@ -268,52 +269,7 @@ function wsSend(data, { queue = true } = {}) {
   return false;
 }
 
-function startHeartbeat() {
-  if (!ENABLE_HEARTBEAT) return;
-  stopHeartbeat();
-
-  heartbeatTimer = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    if (pingSupported === null || pingSupported === true) {
-      try {
-        ws.ping();
-        if (HEARTBEAT_TIMEOUT > 0) {
-          heartbeatTimeoutTimer = setTimeout(() => {
-            console.warn('⚠️  心跳超时，连接可能已断开');
-            if (ws) {
-              ws.terminate();
-            }
-          }, HEARTBEAT_TIMEOUT);
-        }
-      } catch (err) {
-        console.warn('⚠️  发送 ping 失败:', maskUrl(err.message));
-        pingSupported = false;
-      }
-    }
-
-    if (ENABLE_LISTTOOLS_KEEPALIVE && (!ENABLE_HEARTBEAT || pingSupported === false)) {
-      if (now() - lastMessageTime > HEARTBEAT_INTERVAL) {
-        console.log('💓 listTools 保活探测');
-        wsSendImmediate({ jsonrpc: '2.0', method: 'tools/list', id: `keepalive-${now()}` });
-      }
-    }
-  }, HEARTBEAT_INTERVAL);
-}
-
-function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-  if (heartbeatTimeoutTimer) {
-    clearTimeout(heartbeatTimeoutTimer);
-    heartbeatTimeoutTimer = null;
-  }
-}
-
 function cleanupWs() {
-  stopHeartbeat();
   if (ws) {
     try {
       ws.removeAllListeners();
@@ -327,34 +283,85 @@ function jitter(base) {
   return Math.floor(base * (0.8 + Math.random() * 0.4));
 }
 
-function scheduleReconnect(code) {
+function scheduleReconnect() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (AGGRESSIVE_RECONNECT) {
+    const delay = jitter(RECONNECT_DELAY);
+    console.log(`🔄 快速重连模式，${Math.round(delay / 1000)}s 后重连...`);
+    reconnectTimer = setTimeout(() => {
+      try {
+        connectXiaozhi();
+      } catch (error) {
+        console.error('❌ 快速重连失败:', maskUrl(error.message));
+        scheduleReconnect();
+      }
+    }, delay);
+    return;
+  }
+
+  if (quickReconnectAttempts >= MAX_QUICK_RECONNECT) {
+    if (!isInInfiniteReconnectMode) {
+      isInInfiniteReconnectMode = true;
+      console.log(`🔄 快速重连次数已达上限(${MAX_QUICK_RECONNECT})，进入无限重连模式`);
+    }
+    scheduleInfiniteReconnect();
+    return;
+  }
+
+  const delay = Math.min(
+    RECONNECT_DELAY * Math.pow(2, quickReconnectAttempts),
+    RECONNECT_MAX_DELAY
+  );
+  console.log(`🔄 第 ${quickReconnectAttempts + 1}/${MAX_QUICK_RECONNECT} 次快速重连，${Math.round(delay / 1000)}s 后重试...`);
+  reconnectTimer = setTimeout(() => {
+    quickReconnectAttempts++;
+    try {
+      connectXiaozhi();
+    } catch (error) {
+      console.error('❌ 快速重连失败:', maskUrl(error.message));
+      scheduleReconnect();
+    }
+  }, jitter(delay));
+}
+
+function scheduleInfiniteReconnect() {
+  infiniteRetryCount++;
+
+  if (MAX_INFINITE_RETRIES > 0 && infiniteRetryCount > MAX_INFINITE_RETRIES) {
+    console.log(`⏹️  已达到最大无限重连次数(${MAX_INFINITE_RETRIES})，停止重连`);
+    return;
   }
 
   let delay;
-  if (code === 1006) {
-    consecutive1006Count++;
-    if (consecutive1006Count <= 3) {
-      delay = RECONNECT_DELAY;
-    } else {
-      delay = Math.min(RECONNECT_DELAY * Math.pow(1.5, consecutive1006Count - 3), RECONNECT_MAX_DELAY);
-    }
-    console.log(`🔄 空闲超时(${code})，连续 ${consecutive1006Count} 次，${Math.round(delay / 1000)}s 后重连...`);
-  } else {
-    consecutive1006Count = 0;
-    delay = reconnectDelay;
-    console.log(`🔴 小智断开(${code})，${Math.round(delay / 1000)}s 后重连...`);
-    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY);
+  if (infiniteRetryCount >= SLEEP_THRESHOLD && !isInSleepMode) {
+    isInSleepMode = true;
+    console.log(`😴 连续失败 ${SLEEP_THRESHOLD} 次，进入休眠模式`);
   }
 
-  delay = jitter(delay);
-  reconnectTimer = setTimeout(connectXiaozhi, delay);
+  if (isInSleepMode) {
+    delay = SLEEP_INTERVAL;
+    console.log(`😴 休眠模式，${Math.round(delay / 60000)} 分钟后重连（第 ${infiniteRetryCount} 次）`);
+  } else {
+    delay = INFINITE_RECONNECT_DELAY;
+    console.log(`🔄 无限重连，${Math.round(delay / 60000)} 分钟后重试（第 ${infiniteRetryCount}/${MAX_INFINITE_RETRIES || '∞'} 次）`);
+  }
+
+  reconnectTimer = setTimeout(() => {
+    console.log(`🔄 进行无限重连尝试（第 ${infiniteRetryCount}/${MAX_INFINITE_RETRIES || '∞'} 次）...`);
+    try {
+      connectXiaozhi();
+    } catch (error) {
+      console.error('❌ 无限重连失败:', maskUrl(error.message));
+      scheduleInfiniteReconnect();
+    }
+  }, jitter(delay));
 }
 
 function handleIncomingMessage(raw) {
-  lastMessageTime = now();
-
   let msg;
   try { msg = JSON.parse(raw.toString()); }
   catch { return; }
@@ -432,12 +439,6 @@ function connectXiaozhi() {
   isClosed = false;
   cleanupWs();
   console.log(`🔗 连接小智: ${maskUrl(XIAOZHI_URL)}`);
-  if (ENABLE_HEARTBEAT) {
-    console.log(`💓 心跳保活已启用，间隔 ${HEARTBEAT_INTERVAL / 1000}s，超时 ${HEARTBEAT_TIMEOUT / 1000}s`);
-  }
-  if (ENABLE_LISTTOOLS_KEEPALIVE) {
-    console.log(`📋 listTools 保活已启用`);
-  }
 
   ws = new WebSocket(XIAOZHI_URL, {
     perMessageDeflate: false,
@@ -446,37 +447,32 @@ function connectXiaozhi() {
 
   ws.on('open', () => {
     console.log('🟢 小智 WebSocket 已连接');
-    lastMessageTime = now();
-    reconnectDelay = RECONNECT_DELAY;
-    consecutive1006Count = 0;
-    pingSupported = null;
-    startHeartbeat();
+    quickReconnectAttempts = 0;
+    isInInfiniteReconnectMode = false;
+    infiniteRetryCount = 0;
+    isInSleepMode = false;
+
+    try {
+      const notification = {
+        jsonrpc: '2.0',
+        method: 'notifications/tools/list_changed',
+      };
+      ws.send(JSON.stringify(notification));
+      console.log('📢 已通知小智工具列表更新');
+    } catch (e) {
+      console.warn('⚠️  通知工具列表更新失败:', maskUrl(e.message));
+    }
+
     flushMessageQueue();
   });
 
   ws.on('message', handleIncomingMessage);
 
-  ws.on('pong', () => {
-    lastMessageTime = now();
-    if (heartbeatTimeoutTimer) {
-      clearTimeout(heartbeatTimeoutTimer);
-      heartbeatTimeoutTimer = null;
-    }
-    if (pingSupported === null) {
-      pingSupported = true;
-      console.log('✅ WebSocket ping/pong 心跳可用');
-    }
-  });
-
-  ws.on('ping', () => {
-    lastMessageTime = now();
-  });
-
-  ws.on('close', (code) => {
+  ws.on('close', () => {
     if (isClosed) return;
     isClosed = true;
-    stopHeartbeat();
-    scheduleReconnect(code);
+    console.log('🔴 小智连接断开');
+    scheduleReconnect();
   });
 
   ws.on('error', (err) => {

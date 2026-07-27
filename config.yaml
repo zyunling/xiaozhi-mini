@@ -7,20 +7,24 @@
 xiaozhi:
   # 小智 MCP 服务 base URL（一般不用改）
   base_url: "wss://api.xiaozhi.me/mcp/"
-  # 1006 空闲超时后的重连延迟（ms），默认 3s
-  # reconnect_delay: 3000
-  # 重连最大延迟（ms），默认 60s
+  # 快速重连延迟（ms），默认 2s
+  # reconnect_delay: 2000
+  # 快速重连最大延迟（ms），默认 60s
   # reconnect_max_delay: 60000
-  # 是否启用 WebSocket 协议层 ping/pong 心跳保活（默认 true）
-  # 注意：如果服务端不支持客户端 ping，会自动降级
-  # enable_heartbeat: true
-  # 心跳间隔（ms），默认 25s（需小于服务端超时时间）
-  # heartbeat_interval: 25000
-  # 心跳超时（ms），默认 10s，超时未收到 pong 则认为连接已断开
-  # heartbeat_timeout: 10000
-  # 是否启用 listTools 应用层保活（默认 false）
-  # 当 ping 不可用时，通过定期调用 tools/list 维持连接活性
-  # enable_listtools_keepalive: false
+  # 是否启用快速重连模式（默认 true）
+  # 启用后：固定间隔快速重连，适合小智官方 endpoint
+  # 关闭后：指数退避 → 无限重连 → 休眠模式
+  # aggressive_reconnect: true
+  # 快速重连最大尝试次数（默认 10）
+  # max_quick_reconnect: 10
+  # 无限重连间隔（ms），默认 30 分钟
+  # infinite_reconnect_delay: 1800000
+  # 无限重连最大次数（默认 48，约 24 小时），0 表示不限
+  # max_infinite_retries: 48
+  # 进入休眠模式前的失败次数（默认 12）
+  # sleep_threshold: 12
+  # 休眠间隔（ms），默认 2 小时
+  # sleep_interval: 7200000
   # 消息队列最大长度，断开期间缓存的消息数上限（默认 100）
   # message_queue_max: 100
   #
