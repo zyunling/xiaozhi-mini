@@ -110,7 +110,14 @@ function interpolateEnv(str) {
 // ── 工具：解析 SSE 流，取出 JSON-RPC 响应 ─────────────────
 // 兼容两种情况：1) 单个 JSON 响应  2) SSE 流式响应（取完整 JSON）
 async function parseSSEResponse(response) {
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`HTTP ${response.status}: ${text.substring(0, 200)}`);
+  }
   const text = await response.text();
+  if (!text || text.trim() === '') {
+    throw new Error('Empty response');
+  }
   const lines = text.split('\n');
   const dataLines = [];
   for (const line of lines) {
@@ -121,13 +128,21 @@ async function parseSSEResponse(response) {
     }
   }
   if (dataLines.length === 0) {
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`JSON parse failed: ${text.substring(0, 200)}`);
+    }
   }
   const lastData = dataLines[dataLines.length - 1];
   try {
     return JSON.parse(lastData.trim());
   } catch {
-    return JSON.parse(dataLines.join('').trim());
+    try {
+      return JSON.parse(dataLines.join('').trim());
+    } catch (e) {
+      throw new Error(`SSE parse failed: ${dataLines.join('').substring(0, 200)}`);
+    }
   }
 }
 
