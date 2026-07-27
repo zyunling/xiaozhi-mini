@@ -207,7 +207,7 @@ async function initUpstreams() {
 function aggregateTools() {
   const all = [];
   const MAX_DESC_LEN = 300;
-  const MAX_PAYLOAD_SIZE = 50000;
+  const MAX_PAYLOAD_SIZE = 40000;
 
   for (const [name, up] of upstreams) {
     if (up.error) continue;
