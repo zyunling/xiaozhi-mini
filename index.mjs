@@ -206,8 +206,8 @@ async function initUpstreams() {
 // ── 2. 聚合工具列表（加前缀）─────────────────────────────
 function aggregateTools() {
   const all = [];
-  const MAX_DESC_LEN = 500;
-  const MAX_TOOLS = 50;
+  const MAX_DESC_LEN = 200;
+  const MAX_PAYLOAD_SIZE = 7500;
 
   for (const [name, up] of upstreams) {
     if (up.error) continue;
@@ -216,12 +216,12 @@ function aggregateTools() {
 
       if (name === 'memory') {
         const memoryDescMap = {
-          'create_entities': '创建记忆：当用户说"记住"、"记录"、"帮我记着"时，把信息保存到长期记忆。例如"记住我叫张三"→用此工具',
-          'add_observations': '补充记忆：给已有记忆添加新细节。例如用户之前提过名字，现在补充"他还喜欢喝咖啡"',
-          'read_graph': '读取全部记忆：当用户问"你知道我什么"、"我是谁"时，查看已记录的所有信息',
-          'search_nodes': '搜索记忆：当用户提到一个关键词，想不起来之前是否记过时，用此工具查找',
+          'create_entities': '创建记忆：当用户说"记住"、"记录"、"帮我记着"时，把信息保存到长期记忆',
+          'add_observations': '补充记忆：给已有记忆添加新细节',
+          'read_graph': '读取全部记忆：当用户问"你知道我什么"、"我是谁"时使用',
+          'search_nodes': '搜索记忆：用关键词查找已记录的信息',
           'open_nodes': '打开记忆详情：查看某个具体记忆的完整内容',
-          'delete_entities': '删除记忆：用户要求"删掉"、"忘掉"某条记录时使用',
+          'delete_entities': '删除记忆：用户要求"删掉"、"忘掉"某条记录',
           'delete_observations': '删除记忆中的某条细节',
           'delete_relations': '删除记忆中的关联关系'
         };
@@ -229,19 +229,22 @@ function aggregateTools() {
       }
 
       if (desc.length > MAX_DESC_LEN) {
-        desc = desc.substring(0, MAX_DESC_LEN) + '...';
+        desc = desc.substring(0, MAX_DESC_LEN);
       }
 
-      all.push({
+      const tool = {
         name: `${name}_${t.name}`,
         description: `[${name}] ${desc}`,
         inputSchema: t.inputSchema
-      });
+      };
 
-      if (all.length >= MAX_TOOLS) {
-        console.warn(`⚠️  工具数量达到上限 ${MAX_TOOLS}，已截断`);
+      const testPayload = { jsonrpc: '2.0', result: { tools: [...all, tool] }, id: 1 };
+      if (JSON.stringify(testPayload).length > MAX_PAYLOAD_SIZE) {
+        console.warn(`⚠️  payload 接近上限，已截断到 ${all.length} 个工具`);
         return all;
       }
+
+      all.push(tool);
     }
   }
   return all;
