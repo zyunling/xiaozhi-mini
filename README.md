@@ -11,6 +11,8 @@
 - 📦 **工具聚合**：多 upstream 工具自动加前缀合并，推给小智
 - 💓 **稳定保活**：正确响应小智服务端 JSON-RPC `ping`，连接不再 1006
 - 🔁 **三重重连**：快速重连 → 无限重连 → 休眠模式，断线无感知
+- 📦 **Payload 控制**：自动截断工具描述，payload 控制在 40KB 以内，避免 1009
+- 🔑 **环境变量插值**：配置中支持 `${VAR}` 引用 `.env` 变量，密钥不硬编码
 - 📝 **YAML 配置**：加 MCP 工具只需改 config.yaml + restart
 - 🔒 **密钥分离**：Token 独立在 `.env` 文件，避免误提交
 - 🔒 **日志脱敏**：自动遮蔽 URL 中的 token，避免密钥泄露到日志
@@ -22,12 +24,13 @@ git clone https://github.com/zyunling/xiaozhi-mini.git
 cd xiaozhi-mini
 ```
 
-1. 配置小智 Token
+1. 配置密钥
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入你的小智 token
-# XIAOZHI_TOKEN=你的真实token
+# 编辑 .env，填入你的 token 和 API Key
+# XIAOZHI_TOKEN=你的小智token
+# TAVILY_API_KEY=你的tavily_key（可选）
 ```
 
 2. 编辑 `config.yaml`，配置 upstream MCP Server
@@ -51,14 +54,15 @@ docker logs -f xiaozhi-mini
 正常启动日志：
 
 ```text
-🚀 xiaozhi-mini v2.4.0 启动中...
+🚀 xiaozhi-mini v2.5.0 启动中...
 ✅ [ha] streamable-http: 14 个工具
 ✅ [memory] stdio: 9 个工具 (PID: 16)
-📦 2 个 upstream，23 个工具
+✅ [tavily] streamable-http: 5 个工具
+📦 3 个 upstream，28 个工具
 🔗 连接小智: wss://api.xiaozhi.me/mcp/?token=***
 🟢 小智 WebSocket 已连接
 📢 已通知小智工具列表更新
-📤 推送 23 个工具给小智
+📤 推送 28 个工具给小智 (payload: 37KB)
 ```
 
 ## ⚙️ 配置说明
@@ -68,6 +72,9 @@ docker logs -f xiaozhi-mini
 ```env
 # 小智 MCP 连接 Token（从小智后台获取）
 XIAOZHI_TOKEN=your_token_here
+
+# 可选：其他 MCP Server 的 API Key
+# TAVILY_API_KEY=your_tavily_key
 ```
 
 ### `config.yaml` — 功能配置
@@ -93,6 +100,13 @@ upstreams:
     args: ["-y", "@modelcontextprotocol/server-memory"]
     env:
       MEMORY_FILE_PATH: /tmp/memory.jsonl
+
+  # 支持环境变量插值：${VAR} 会自动替换为 .env 中的值
+  tavily:
+    type: streamable-http
+    url: "https://api.tavily.com/mcp"
+    headers:
+      Authorization: "Bearer ${TAVILY_API_KEY}"
 ```
 
 | 字段 | 说明 |
@@ -107,11 +121,14 @@ upstreams:
 | `xiaozhi.sleep_interval` | 休眠间隔（ms），默认 2 小时 |
 | `xiaozhi.message_queue_max` | 断线期间缓存消息数上限（默认 100） |
 | `upstreams.*.type` | `streamable-http` 或 `stdio` |
-| `upstreams.*.url` | HTTP 类型填端点 URL |
+| `upstreams.*.url` | HTTP 类型填端点 URL，支持 `${VAR}` 环境变量插值 |
+| `upstreams.*.headers` | HTTP 请求头，支持 `${VAR}` 环境变量插值 |
 | `upstreams.*.command/args` | stdio 类型填启动命令 |
 | `upstreams.*.env` | 可选，注入到子进程的环境变量 |
 
-> 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接。本项目已正确实现该握手，连接可长期保持稳定。
+> 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接（1006）。本项目已正确实现该握手，连接可长期保持稳定。
+
+> ⚠️ **关于 Payload 大小**：小智云端 endpoint 对 WebSocket 消息大小有限制（约 40KB），超过会触发 1009 断连。本项目会自动截断工具描述并在接近上限时减少推送的工具数量。
 
 ## ➕ 添加 MCP Server
 
@@ -123,6 +140,11 @@ docker compose restart
 
 小智会自动拿到新工具（带前缀，如 `tavily_search`、`filesystem_read`）。
 
+如果工具数量较多导致 payload 超限，日志会提示：
+```
+⚠️  payload 接近上限(40000)，已截断到 X 个工具
+```
+
 ## 📊 对比 MCPHub
 
 | 指标 | MCPHub | xiaozhi-mini |
@@ -132,7 +154,8 @@ docker compose restart
 | 工具列表 | pg 查询 | 内存缓存，零 IO |
 | 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
 | 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 |
-| 密钥管理 | 写在配置文件 | 独立 `.env`，防误提交 |
+| Payload 控制 | 无 | 自动截断，40KB 上限 |
+| 密钥管理 | 写在配置文件 | 独立 `.env` + `${VAR}` 插值 |
 
 ## 🗺️ Roadmap
 

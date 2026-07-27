@@ -1,5 +1,5 @@
 /**
- * xiaozhi-mini v2.4
+ * xiaozhi-mini v2.5
  * 轻量 MCP 聚合桥：小智 wss(MCP) ↔ N 个 upstream MCP Server
  * streamable-http: 自己 fetch + SSE 解析（避开 SDK 路径问题）
  * stdio: 仍用 SDK StdioClientTransport（路径稳定）
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
