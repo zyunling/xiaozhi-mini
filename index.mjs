@@ -95,6 +95,18 @@ function maskUrl(s) {
     .replace(/(\/\d{3,5}\/)[A-Za-z0-9_\-]{8,}/gi, '$1***');
 }
 
+function interpolateEnv(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/\$\{([^}]+)\}/g, (_, key) => {
+    const value = process.env[key];
+    if (value === undefined) {
+      console.warn(`⚠️  环境变量 ${key} 未定义`);
+      return `\${${key}}`;
+    }
+    return value;
+  });
+}
+
 // ── 工具：解析 SSE 流，取出 JSON-RPC 响应 ─────────────────
 // 兼容两种情况：1) 单个 JSON 响应  2) SSE 流式响应（取完整 JSON）
 async function parseSSEResponse(response) {
@@ -138,14 +150,19 @@ async function initUpstreams() {
   for (const [name, cfg] of Object.entries(config.upstreams || {})) {
     try {
       if (cfg.type === 'streamable-http') {
+        const interpolatedUrl = interpolateEnv(cfg.url);
+        const interpolatedHeaders = {};
+        for (const [key, value] of Object.entries(cfg.headers || {})) {
+          interpolatedHeaders[key] = interpolateEnv(value);
+        }
         const listResp = await postHA(
-          { url: cfg.url, headers: cfg.headers || {} },
+          { url: interpolatedUrl, headers: interpolatedHeaders },
           'tools/list',
           {},
           'init-list'
         );
         const tools = listResp.result?.tools || [];
-        upstreams.set(name, { type: 'streamable-http', url: cfg.url, headers: cfg.headers || {}, tools });
+        upstreams.set(name, { type: 'streamable-http', url: interpolatedUrl, headers: interpolatedHeaders, tools });
         console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
       } else if (cfg.type === 'stdio') {
         const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
