@@ -206,12 +206,14 @@ async function initUpstreams() {
 // ── 2. 聚合工具列表（加前缀）─────────────────────────────
 function aggregateTools() {
   const all = [];
+  const MAX_DESC_LEN = 500;
+  const MAX_TOOLS = 50;
+
   for (const [name, up] of upstreams) {
+    if (up.error) continue;
     for (const t of up.tools) {
       let desc = t.description || '';
 
-      // 给 memory/knowledge-graph 工具添加中文记忆语义，
-      // 否则中文 LLM 听到"记住"不会和英文的 "create_entities" 关联起来
       if (name === 'memory') {
         const memoryDescMap = {
           'create_entities': '创建记忆：当用户说"记住"、"记录"、"帮我记着"时，把信息保存到长期记忆。例如"记住我叫张三"→用此工具',
@@ -226,7 +228,20 @@ function aggregateTools() {
         desc = memoryDescMap[t.name] || desc;
       }
 
-      all.push({ ...t, name: `${name}_${t.name}`, description: `[${name}] ${desc}` });
+      if (desc.length > MAX_DESC_LEN) {
+        desc = desc.substring(0, MAX_DESC_LEN) + '...';
+      }
+
+      all.push({
+        name: `${name}_${t.name}`,
+        description: `[${name}] ${desc}`,
+        inputSchema: t.inputSchema
+      });
+
+      if (all.length >= MAX_TOOLS) {
+        console.warn(`⚠️  工具数量达到上限 ${MAX_TOOLS}，已截断`);
+        return all;
+      }
     }
   }
   return all;
@@ -425,8 +440,13 @@ function handleIncomingMessage(raw) {
 
   if (msg.method === 'tools/list') {
     const tools = aggregateTools();
-    wsSend({ jsonrpc: '2.0', result: { tools }, id: msg.id });
-    console.log(`📤 推送 ${tools.length} 个工具给小智`);
+    const payload = { jsonrpc: '2.0', result: { tools }, id: msg.id };
+    const payloadSize = JSON.stringify(payload).length;
+    console.log(`📤 推送 ${tools.length} 个工具给小智 (payload: ${Math.round(payloadSize / 1024)}KB)`);
+    if (payloadSize > 100000) {
+      console.warn(`⚠️  payload 过大 (${payloadSize} bytes)，可能导致连接断开`);
+    }
+    wsSend(payload);
     return;
   }
 
