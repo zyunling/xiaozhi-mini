@@ -379,6 +379,18 @@ function handleIncomingMessage(raw) {
     return;
   }
 
+  // MCP 协议初始化完成通知，静默处理
+  if (msg.method === 'notifications/initialized') {
+    return;
+  }
+
+  // 小智服务端 ping 保活探测，必须回复 pong（空 result）
+  // 不回复会导致服务端在30秒后断开连接（1006）
+  if (msg.method === 'ping') {
+    wsSend({ jsonrpc: '2.0', result: {}, id: msg.id });
+    return;
+  }
+
   if (msg.method === 'tools/list') {
     const tools = aggregateTools();
     wsSend({ jsonrpc: '2.0', result: { tools }, id: msg.id });
