@@ -206,8 +206,8 @@ async function initUpstreams() {
 // ── 2. 聚合工具列表（加前缀）─────────────────────────────
 function aggregateTools() {
   const all = [];
-  const MAX_DESC_LEN = 200;
-  const MAX_PAYLOAD_SIZE = 7500;
+  const MAX_DESC_LEN = 300;
+  const MAX_PAYLOAD_SIZE = 50000;
 
   for (const [name, up] of upstreams) {
     if (up.error) continue;
@@ -239,8 +239,9 @@ function aggregateTools() {
       };
 
       const testPayload = { jsonrpc: '2.0', result: { tools: [...all, tool] }, id: 1 };
-      if (JSON.stringify(testPayload).length > MAX_PAYLOAD_SIZE) {
-        console.warn(`⚠️  payload 接近上限，已截断到 ${all.length} 个工具`);
+      const testSize = JSON.stringify(testPayload).length;
+      if (testSize > MAX_PAYLOAD_SIZE) {
+        console.warn(`⚠️  payload 接近上限(${MAX_PAYLOAD_SIZE})，已截断到 ${all.length} 个工具`);
         return all;
       }
 
