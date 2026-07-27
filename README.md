@@ -2,14 +2,15 @@
 
 > 轻量 MCP 聚合桥：小智 AI ↔ N 个 MCP Server，内存占用 ~50-70MB
 
-替代 MCPHub（~800MB），专干一件事：把小智后台的 `wss://api.xiaozhi.me/mcp/` 和多个标准 MCP Server（streamable-http / stdio）桥接起来，工具自动聚合、前缀路由、空闲超时 3 秒自愈。
+替代 MCPHub（~800MB），专干一件事：把小智后台的 `wss://api.xiaozhi.me/mcp/` 和多个标准 MCP Server（streamable-http / stdio）桥接起来，工具自动聚合、前缀路由、连接稳定不掉线。
 
 ## ✨ 特性
 
 - 🪶 **超轻量**：Node 单进程，内存 50-70MB（MCPHub 的 1/12）
 - 🔌 **双协议**：streamable-http（自动解析 SSE） + stdio（子进程）
 - 📦 **工具聚合**：多 upstream 工具自动加前缀合并，推给小智
-- 🔁 **断线自愈**：1006 空闲超时固定 3s 重连，其他错误指数退避（3s→60s）
+- 💓 **稳定保活**：正确响应小智服务端 JSON-RPC `ping`，连接不再 1006
+- 🔁 **三重重连**：快速重连 → 无限重连 → 休眠模式，断线无感知
 - 📝 **YAML 配置**：加 MCP 工具只需改 config.yaml + restart
 - 🔒 **密钥分离**：Token 独立在 `.env` 文件，避免误提交
 - 🔒 **日志脱敏**：自动遮蔽 URL 中的 token，避免密钥泄露到日志
@@ -50,13 +51,14 @@ docker logs -f xiaozhi-mini
 正常启动日志：
 
 ```text
-🚀 xiaozhi-mini v2.4 启动中...
-✅ [ha] streamable-http: 84 个工具
-✅ [memory] stdio: 9 个工具
-📦 2 个 upstream，93 个工具
+🚀 xiaozhi-mini v2.4.0 启动中...
+✅ [ha] streamable-http: 14 个工具
+✅ [memory] stdio: 9 个工具 (PID: 16)
+📦 2 个 upstream，23 个工具
 🔗 连接小智: wss://api.xiaozhi.me/mcp/?token=***
 🟢 小智 WebSocket 已连接
-📤 推送 93 个工具给小智
+📢 已通知小智工具列表更新
+📤 推送 23 个工具给小智
 ```
 
 ## ⚙️ 配置说明
@@ -72,10 +74,11 @@ XIAOZHI_TOKEN=your_token_here
 
 ```yaml
 xiaozhi:
-  # 小智 MCP 服务 base URL（一般不用改）
   base_url: "wss://api.xiaozhi.me/mcp/"
-  # 1006 空闲超时后的重连延迟（ms），默认 3000
-  # reconnect_delay: 3000
+  # 快速重连延迟（ms），默认 2s
+  # reconnect_delay: 2000
+  # 是否启用快速重连模式（默认 true）
+  # aggressive_reconnect: true
 
 upstreams:
   ha:
@@ -95,13 +98,20 @@ upstreams:
 | 字段 | 说明 |
 |------|------|
 | `xiaozhi.base_url` | 小智 MCP endpoint 基础地址（token 从 `.env` 注入） |
-| `xiaozhi.reconnect_delay` | 空闲超时重连延迟（ms），默认 3000 |
+| `xiaozhi.reconnect_delay` | 快速重连延迟（ms），默认 2000 |
+| `xiaozhi.aggressive_reconnect` | 快速重连模式（默认 true），关闭后启用指数退避→无限重连→休眠 |
+| `xiaozhi.max_quick_reconnect` | 快速重连最大次数（默认 10），超限后进入无限重连 |
+| `xiaozhi.infinite_reconnect_delay` | 无限重连间隔（ms），默认 30 分钟 |
+| `xiaozhi.max_infinite_retries` | 无限重连最大次数（默认 48，约 24 小时） |
+| `xiaozhi.sleep_threshold` | 进入休眠模式前的失败次数（默认 12） |
+| `xiaozhi.sleep_interval` | 休眠间隔（ms），默认 2 小时 |
+| `xiaozhi.message_queue_max` | 断线期间缓存消息数上限（默认 100） |
 | `upstreams.*.type` | `streamable-http` 或 `stdio` |
 | `upstreams.*.url` | HTTP 类型填端点 URL |
 | `upstreams.*.command/args` | stdio 类型填启动命令 |
 | `upstreams.*.env` | 可选，注入到子进程的环境变量 |
 
-> 💡 **关于心跳保活**：小智 MCP endpoint 不支持客户端主动发送 Ping 帧或心跳消息（发送会被服务端主动断开）。策略是：服务端空闲 40-60s 以 1006 断开后，客户端固定 3s 延迟快速重连，对用户透明。
+> 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接。本项目已正确实现该握手，连接可长期保持稳定。
 
 ## ➕ 添加 MCP Server
 
@@ -120,8 +130,8 @@ docker compose restart
 | 内存 | ~800MB | **~50-70MB** |
 | 依赖 | Node + pg + pgvector + React | Node + ws + yaml |
 | 工具列表 | pg 查询 | 内存缓存，零 IO |
-| 保活策略 | 配置层 bug 不生效 | 3s 快速重连 + 指数退避 |
-| 重连 | MCP 工具丢失 | 3s 自愈 + 自动重推 |
+| 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
+| 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 |
 | 密钥管理 | 写在配置文件 | 独立 `.env`，防误提交 |
 
 ## 🗺️ Roadmap
