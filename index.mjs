@@ -212,6 +212,7 @@ function startUpstreamRetry() {
     if (failedNames.length === 0) return;
 
     console.log(`🔄 检查 ${failedNames.length} 个失败的 upstream...`);
+    let anySuccess = false;
     for (const name of failedNames) {
       const cfg = config.upstreams?.[name];
       if (!cfg) continue;
@@ -223,22 +224,28 @@ function startUpstreamRetry() {
         }
         upstreams.delete(name);
         await initOneUpstream(name, cfg);
-        // 如果重连成功，通知所有小智连接工具列表更新
         const newUp = upstreams.get(name);
         if (newUp && !newUp.error) {
           console.log(`🎉 [${name}] 重连成功！`);
-          for (const conn of xiaozhiConnections) {
-            try {
-              conn.wsSendImmediate({
-                jsonrpc: '2.0',
-                method: 'notifications/tools/list_changed',
-              });
-            } catch (_) { /* ignore */ }
-          }
+          anySuccess = true;
         }
       } catch (err) {
         console.error(`❌ [${name}] 重连仍失败: ${maskUrl(err.message)}`);
         upstreams.set(name, { type: cfg.type, tools: [], error: maskUrl(err.message) });
+      }
+    }
+    // 有 upstream 重连成功时，重新建立小智连接以刷新工具列表。
+    // 小智服务端在连接保持期间不会响应 notifications/tools/list_changed
+    // 重新拉取 tools/list，只在新连接建立时才拉取，因此需要软重连。
+    // 消息队列会缓存断连期间的消息，不会丢失。
+    if (anySuccess) {
+      for (const conn of xiaozhiConnections) {
+        try {
+          console.log(`[${conn.name}] 🔄 upstream 工具列表变更，重新连接以刷新`);
+          conn.connect();
+        } catch (err) {
+          console.error(`[${conn.name}] ❌ 重新连接失败:`, maskUrl(err.message));
+        }
       }
     }
   }, UPSTREAM_RETRY_INTERVAL);

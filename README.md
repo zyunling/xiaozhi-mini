@@ -1,12 +1,12 @@
 # xiaozhi-mini
 
-> 轻量 MCP 聚合桥：小智 AI ↔ N 个 MCP Server，内存占用 ~50-70MB
+> 轻量 MCP 聚合桥：小智 AI ↔ N 个 MCP Server，内存占用 ~60MB（纯 HTTP）或 ~150-180MB（含 stdio 子进程）
 
 替代 MCPHub（~800MB），专干一件事：把小智后台的 `wss://api.xiaozhi.me/mcp/` 和多个标准 MCP Server（streamable-http / stdio）桥接起来，工具自动聚合、前缀路由、连接稳定不掉线。
 
 ## ✨ 特性
 
-- 🪶 **超轻量**：Node 单进程，内存 50-70MB（MCPHub 的 1/12）
+- 🪶 **超轻量**：Node 单进程，纯 HTTP upstream 仅 ~60MB；含 stdio 子进程约 150-180MB（仍仅 MCPHub 的 1/4）
 - 🔌 **双协议**：streamable-http（自动解析 SSE） + stdio（子进程）
 - 📦 **工具聚合**：多 upstream 工具自动加前缀合并，推给小智
 - 💓 **稳定保活**：正确响应小智服务端 JSON-RPC `ping`，连接不再 1006
@@ -176,7 +176,7 @@ docker compose restart
 
 | 指标 | MCPHub | xiaozhi-mini |
 |------|--------|---------------|
-| 内存 | ~800MB | **~50-70MB** |
+| 内存 | ~800MB | **~60MB（纯 HTTP）/ ~180MB（含 stdio）** |
 | 依赖 | Node + pg + pgvector + React | Node + ws + yaml |
 | 工具列表 | pg 查询 | 内存缓存，零 IO |
 | 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
