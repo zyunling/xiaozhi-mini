@@ -67,6 +67,15 @@ upstreams:
   #   command: "npx"
   #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
+  # 示例5：云端闹钟（倒计时/定时/重复）
+  # alarm:
+  #   type: stdio
+  #   command: "node"
+  #   args: ["alarm-server.mjs"]
+  #   cwd: /app
+  #   env:
+  #     ALARM_DATA_DIR: /app/data
+
   # 示例4：高德地图（需要 API Key）
   # amap:
   #   type: streamable-http

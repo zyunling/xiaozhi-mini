@@ -181,9 +181,15 @@ async function initUpstreams() {
         console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
       } else if (cfg.type === 'stdio') {
         const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-        const transport = new StdioClientTransport({
-          command: cfg.command, args: cfg.args || [], env: { ...process.env, ...(cfg.env || {}) }
-        });
+        const transportOpts = {
+          command: cfg.command,
+          args: cfg.args || [],
+          env: { ...process.env, ...(cfg.env || {}) }
+        };
+        if (cfg.cwd) {
+          transportOpts.cwd = cfg.cwd;
+        }
+        const transport = new StdioClientTransport(transportOpts);
         const client = new Client(
           { name: `mini-${name}`, version: VERSION },
           { capabilities: {} }

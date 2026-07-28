@@ -12,7 +12,12 @@ RUN npm install --omit=dev
 RUN npm install -g @modelcontextprotocol/server-memory 2>/dev/null || true
 
 COPY index.mjs .
+COPY alarm-server.mjs .
 COPY config.yaml .
+
+# 数据持久化目录
+RUN mkdir -p /app/data && chown node:node /app/data
+VOLUME /app/data
 
 USER node
 
