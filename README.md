@@ -1,12 +1,12 @@
 # xiaozhi-mini
 
-> 轻量 MCP 聚合桥：小智 AI ↔ N 个 MCP Server，内存占用 ~60MB（纯 HTTP）或 ~150-180MB（含 stdio 子进程）
+> 轻量 MCP 聚合桥：小智 AI ↔ N 个 MCP Server，内存占用 ~110MB（默认配置）
 
 替代 MCPHub（~800MB），专干一件事：把小智后台的 `wss://api.xiaozhi.me/mcp/` 和多个标准 MCP Server（streamable-http / stdio）桥接起来，工具自动聚合、前缀路由、连接稳定不掉线。
 
 ## ✨ 特性
 
-- 🪶 **超轻量**：Node 单进程，纯 HTTP upstream 仅 ~60MB；含 stdio 子进程约 150-180MB（仍仅 MCPHub 的 1/4）
+- 🪶 **超轻量**：默认配置（HA + memory + tavily）约 110MB，仅 MCPHub 的 1/7
 - 🔌 **双协议**：streamable-http（自动解析 SSE） + stdio（子进程）
 - 📦 **工具聚合**：多 upstream 工具自动加前缀合并，推给小智
 - 💓 **稳定保活**：正确响应小智服务端 JSON-RPC `ping`，连接不再 1006
@@ -59,15 +59,14 @@ docker logs -f xiaozhi-mini
 ```text
 🚀 xiaozhi-mini v2.6.0 启动中...
 ✅ [ha] streamable-http: 14 个工具
-✅ [bing-search] stdio: 5 个工具 (PID: 16)
-✅ [memory] stdio: 9 个工具 (PID: 28)
+✅ [memory] stdio: 9 个工具 (PID: 16)
 ✅ [tavily] streamable-http: 5 个工具
-📦 4 个 upstream，33 个工具
+📦 3 个 upstream，28 个工具
 🔗 准备启动 1 个小智连接
 [xiaozhi-1] 🔗 连接小智: wss://api.xiaozhi.me/mcp/?token=***
 [xiaozhi-1] 🟢 小智 WebSocket 已连接
 [xiaozhi-1] 📢 已通知小智工具列表更新
-[xiaozhi-1] 📤 推送 33 个工具给小智 (payload: 38KB)
+[xiaozhi-1] 📤 推送 28 个工具给小智 (payload: 32KB)
 ```
 
 ## ⚙️ 配置说明
@@ -97,7 +96,7 @@ TAVILY_API_KEY=你的tavily_key
 
 ### `config.yaml` — 功能配置
 
-默认已启用 HA、bing-search、memory、tavily 四个 upstream，所有 URL/Key 通过 `${VAR}` 引用 `.env`，此文件一般不用改。
+默认已启用 HA、memory、tavily 三个 upstream，所有 URL/Key 通过 `${VAR}` 引用 `.env`，此文件一般不用改。需要更多工具（如必应搜索、文件系统等）取消注释对应段落即可。
 
 ```yaml
 xiaozhi:
@@ -116,11 +115,6 @@ upstreams:
     headers:
       Accept: "application/json, text/event-stream"
 
-  bing-search:
-    type: stdio
-    command: "npx"
-    args: ["-y", "bing-cn-mcp"]
-
   memory:
     type: stdio
     command: "npx"
@@ -133,6 +127,12 @@ upstreams:
     url: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
     headers:
       Accept: "application/json, text/event-stream"
+
+  # 可选：必应中文搜索（stdio，省内存默认关闭，已有 Tavily 可不开）
+  # bing-search:
+  #   type: stdio
+  #   command: "npx"
+  #   args: ["-y", "bing-cn-mcp"]
 ```
 
 | 字段 | 说明 |
@@ -176,7 +176,7 @@ docker compose restart
 
 | 指标 | MCPHub | xiaozhi-mini |
 |------|--------|---------------|
-| 内存 | ~800MB | **~60MB（纯 HTTP）/ ~180MB（含 stdio）** |
+| 内存 | ~800MB | **~110MB（默认 3 个 upstream）** |
 | 依赖 | Node + pg + pgvector + React | Node + ws + yaml |
 | 工具列表 | pg 查询 | 内存缓存，零 IO |
 | 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |

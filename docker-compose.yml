@@ -13,11 +13,11 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./memory-data:/workspaces
 
-    # 内存限制：每个 stdio upstream（npx）是独立 Node 子进程，约 40-50MB/个
-    # 主进程 ~60MB + 2 个 stdio 子进程 ~90MB ≈ 150-180MB，256M 留足余量
+    # 内存限制：默认 1 个 stdio（memory）+ 主进程 ≈ 110MB，192M 留足余量
+    # 每多开一个 stdio upstream 约增加 40-50MB，按需调大
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 192M
         reservations:
-          memory: 96M
+          memory: 64M

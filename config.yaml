@@ -40,12 +40,6 @@ upstreams:
     headers:
       Accept: "application/json, text/event-stream"
 
-  # ── 必应中文搜索 ──────────────────────────────────────
-  bing-search:
-    type: stdio
-    command: "npx"
-    args: ["-y", "bing-cn-mcp"]
-
   # ── 知识图谱长期记忆 ──────────────────────────────────
   memory:
     type: stdio
@@ -62,7 +56,13 @@ upstreams:
     headers:
       Accept: "application/json, text/event-stream"
 
-  # ── 以下为示例，取消注释即可启用 ──────────────────────
+  # ── 以下为可选，取消注释即可启用 ──────────────────────
+
+  # 必应中文搜索（stdio，约 40-50MB 内存，已用 Tavily 可不开）
+  # bing-search:
+  #   type: stdio
+  #   command: "npx"
+  #   args: ["-y", "bing-cn-mcp"]
 
   # Sequential Thinking（本地 stdio 进程）
   # sequential:
