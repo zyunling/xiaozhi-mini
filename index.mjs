@@ -3,6 +3,7 @@
  * 轻量 MCP 聚合桥：小智 wss(MCP) ↔ N 个 upstream MCP Server
  * streamable-http: 自己 fetch + SSE 解析（避开 SDK 路径问题）
  * stdio: 仍用 SDK StdioClientTransport（路径稳定）
+ * 支持多个小智 token 同时连接（每 token 一个 XiaozhiConnection 实例）
  */
 
 import WebSocket from 'ws';
@@ -62,25 +63,7 @@ const MAX_INFINITE_RETRIES = config.xiaozhi?.max_infinite_retries || 48;
 const SLEEP_THRESHOLD = config.xiaozhi?.sleep_threshold || 12;
 const SLEEP_INTERVAL = config.xiaozhi?.sleep_interval || 7200000;
 
-// ── 组装小智 WebSocket URL ─────────────────────────────────
-// 优先级：
-// 1. config.xiaozhi.url 中有完整 URL（含 token）且不是占位符 → 直接用
-// 2. 从环境变量 XIAOZHI_TOKEN 读取 token，拼接 base URL
-let XIAOZHI_URL = config.xiaozhi?.url || '';
-const XIAOZHI_TOKEN = process.env.XIAOZHI_TOKEN || '';
-
-if (XIAOZHI_TOKEN && XIAOZHI_TOKEN !== 'REPLACE_WITH_YOUR_TOKEN') {
-  const baseUrl = config.xiaozhi?.base_url || 'wss://api.xiaozhi.me/mcp/';
-  const separator = baseUrl.includes('?') ? '&' : '?';
-  XIAOZHI_URL = `${baseUrl}${separator}token=${XIAOZHI_TOKEN}`;
-}
-
-if (!XIAOZHI_URL || XIAOZHI_URL.includes('REPLACE_WITH_YOUR_TOKEN') || XIAOZHI_URL.includes('YOUR_TOKEN')) {
-  console.error('❌ 请先配置小智 token：');
-  console.error('   方式一：复制 .env.example 为 .env，填入 XIAOZHI_TOKEN');
-  console.error('   方式二：在环境变量中设置 XIAOZHI_TOKEN');
-  process.exit(1);
-}
+const XIAOZHI_BASE_URL = config.xiaozhi?.base_url || 'wss://api.xiaozhi.me/mcp/';
 
 const upstreams = new Map();
 
@@ -163,50 +146,103 @@ async function postHA(up, method, params, rpcId) {
 // ── 1. 初始化所有 upstream ────────────────────────────────
 async function initUpstreams() {
   for (const [name, cfg] of Object.entries(config.upstreams || {})) {
-    try {
-      if (cfg.type === 'streamable-http') {
-        const interpolatedUrl = interpolateEnv(cfg.url);
-        const interpolatedHeaders = {};
-        for (const [key, value] of Object.entries(cfg.headers || {})) {
-          interpolatedHeaders[key] = interpolateEnv(value);
-        }
-        const listResp = await postHA(
-          { url: interpolatedUrl, headers: interpolatedHeaders },
-          'tools/list',
-          {},
-          'init-list'
-        );
-        const tools = listResp.result?.tools || [];
-        upstreams.set(name, { type: 'streamable-http', url: interpolatedUrl, headers: interpolatedHeaders, tools });
-        console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
-      } else if (cfg.type === 'stdio') {
-        const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-        const transportOpts = {
-          command: cfg.command,
-          args: cfg.args || [],
-          env: { ...process.env, ...(cfg.env || {}) }
-        };
-        if (cfg.cwd) {
-          transportOpts.cwd = cfg.cwd;
-        }
-        const transport = new StdioClientTransport(transportOpts);
-        const client = new Client(
-          { name: `mini-${name}`, version: VERSION },
-          { capabilities: {} }
-        );
-        await client.connect(transport);
-        const result = await client.listTools();
-        const tools = result.tools || [];
-        upstreams.set(name, { type: 'stdio', client, transport, tools });
-        console.log(`✅ [${name}] stdio: ${tools.length} 个工具 (PID: ${transport._process?.pid})`);
-      } else {
-        console.warn(`⚠️  [${name}] 未知类型: ${maskUrl(cfg.type)}，跳过`);
-      }
-    } catch (err) {
-      console.error(`❌ [${name}] 初始化失败: ${maskUrl(err)}`);
-      upstreams.set(name, { type: cfg.type, tools: [], error: maskUrl(err.message) });
-    }
+    await initOneUpstream(name, cfg);
   }
+}
+
+async function initOneUpstream(name, cfg) {
+  try {
+    if (cfg.type === 'streamable-http') {
+      const interpolatedUrl = interpolateEnv(cfg.url);
+      const interpolatedHeaders = {};
+      for (const [key, value] of Object.entries(cfg.headers || {})) {
+        interpolatedHeaders[key] = interpolateEnv(value);
+      }
+      const listResp = await postHA(
+        { url: interpolatedUrl, headers: interpolatedHeaders },
+        'tools/list',
+        {},
+        'init-list'
+      );
+      const tools = listResp.result?.tools || [];
+      upstreams.set(name, { type: 'streamable-http', url: interpolatedUrl, headers: interpolatedHeaders, tools });
+      console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
+    } else if (cfg.type === 'stdio') {
+      const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+      const transportOpts = {
+        command: cfg.command,
+        args: cfg.args || [],
+        env: { ...process.env, ...(cfg.env || {}) }
+      };
+      if (cfg.cwd) {
+        transportOpts.cwd = cfg.cwd;
+      }
+      const transport = new StdioClientTransport(transportOpts);
+      const client = new Client(
+        { name: `mini-${name}`, version: VERSION },
+        { capabilities: {} }
+      );
+      await client.connect(transport);
+      const result = await client.listTools();
+      const tools = result.tools || [];
+      upstreams.set(name, { type: 'stdio', client, transport, tools });
+      console.log(`✅ [${name}] stdio: ${tools.length} 个工具 (PID: ${transport._process?.pid})`);
+    } else {
+      console.warn(`⚠️  [${name}] 未知类型: ${maskUrl(cfg.type)}，跳过`);
+    }
+  } catch (err) {
+    console.error(`❌ [${name}] 初始化失败: ${maskUrl(err)}`);
+    upstreams.set(name, { type: cfg.type, tools: [], error: maskUrl(err.message) });
+  }
+}
+
+// ── 1.5 upstream 失败自动重连 ────────────────────────────
+// 每 60 秒检查一次，对初始化失败的 upstream 尝试重新连接
+const UPSTREAM_RETRY_INTERVAL = 60000;
+let upstreamRetryTimer = null;
+
+function startUpstreamRetry() {
+  if (upstreamRetryTimer) return;
+  upstreamRetryTimer = setInterval(async () => {
+    const failedNames = [];
+    for (const [name, up] of upstreams) {
+      if (up.error) {
+        failedNames.push(name);
+      }
+    }
+    if (failedNames.length === 0) return;
+
+    console.log(`🔄 检查 ${failedNames.length} 个失败的 upstream...`);
+    for (const name of failedNames) {
+      const cfg = config.upstreams?.[name];
+      if (!cfg) continue;
+      try {
+        // 先关闭旧的可能残留的连接
+        const oldUp = upstreams.get(name);
+        if (oldUp?.type === 'stdio' && oldUp?.transport) {
+          try { oldUp.transport.close(); } catch (_) { /* ignore */ }
+        }
+        upstreams.delete(name);
+        await initOneUpstream(name, cfg);
+        // 如果重连成功，通知所有小智连接工具列表更新
+        const newUp = upstreams.get(name);
+        if (newUp && !newUp.error) {
+          console.log(`🎉 [${name}] 重连成功！`);
+          for (const conn of xiaozhiConnections) {
+            try {
+              conn.wsSendImmediate({
+                jsonrpc: '2.0',
+                method: 'notifications/tools/list_changed',
+              });
+            } catch (_) { /* ignore */ }
+          }
+        }
+      } catch (err) {
+        console.error(`❌ [${name}] 重连仍失败: ${maskUrl(err.message)}`);
+        upstreams.set(name, { type: cfg.type, tools: [], error: maskUrl(err.message) });
+      }
+    }
+  }, UPSTREAM_RETRY_INTERVAL);
 }
 
 // ── 2. 聚合工具列表（加前缀）─────────────────────────────
@@ -257,7 +293,7 @@ function aggregateTools() {
   return all;
 }
 
-// ── 3. 连小智 WebSocket ───────────────────────────────────
+// ── 3. XiaozhiConnection 类：每个 token 一个实例 ──────────
 //
 // 连接优化策略（参考 mcphub 及其他小智生态项目）：
 // 1. WebSocket 协议层 Ping/Pong 心跳保活（默认开启）
@@ -265,300 +301,400 @@ function aggregateTools() {
 // 3. 指数退避 + 随机抖动重连，避免惊群效应
 // 4. 消息队列：断开期间缓存消息，重连后发送
 // 5. 1006 空闲超时使用更短的延迟快速重连
+//
+// upstreams Map 全局共享：所有连接看到的工具列表一致；
+// 工具调用时哪个连接收到请求，就用哪个连接回复。
 
-let ws = null;
-let isClosed = false;
-let reconnectTimer = null;
-const messageQueue = [];
+class XiaozhiConnection {
+  constructor(name, url, cfg) {
+    this.name = name;       // 连接名称，如 "xiaozhi-1"
+    this.url = url;         // 完整 wss URL（含 token）
+    this.ws = null;
+    this.isClosed = false;
+    this.reconnectTimer = null;
+    this.messageQueue = [];
 
-let quickReconnectAttempts = 0;
-let isInInfiniteReconnectMode = false;
-let infiniteRetryCount = 0;
-let isInSleepMode = false;
+    this.quickReconnectAttempts = 0;
+    this.isInInfiniteReconnectMode = false;
+    this.infiniteRetryCount = 0;
+    this.isInSleepMode = false;
 
-function now() {
-  return Date.now();
-}
-
-function enqueueMessage(data) {
-  if (messageQueue.length >= MESSAGE_QUEUE_MAX_SIZE) {
-    const dropped = messageQueue.shift();
-    console.warn(`⚠️  消息队列已满，丢弃最旧消息: ${dropped?.id || 'unknown'}`);
+    // 重连参数（从全局 config 读取，所有连接共享同一套策略）
+    this.reconnectDelay = cfg.reconnect_delay || 2000;
+    this.reconnectMaxDelay = cfg.reconnect_max_delay || 60000;
+    this.messageQueueMaxSize = cfg.message_queue_max || 100;
+    this.aggressiveReconnect = cfg.aggressive_reconnect !== false;
+    this.maxQuickReconnect = cfg.max_quick_reconnect || 10;
+    this.infiniteReconnectDelay = cfg.infinite_reconnect_delay || 1800000;
+    this.maxInfiniteRetries = cfg.max_infinite_retries || 48;
+    this.sleepThreshold = cfg.sleep_threshold || 12;
+    this.sleepInterval = cfg.sleep_interval || 7200000;
   }
-  messageQueue.push(data);
-}
 
-function flushMessageQueue() {
-  if (messageQueue.length === 0) return;
-  console.log(`📤 重连后发送 ${messageQueue.length} 条缓存消息`);
-  while (messageQueue.length > 0) {
-    const msg = messageQueue.shift();
-    if (!wsSendImmediate(msg)) {
-      messageQueue.unshift(msg);
-      break;
+  log(...args) {
+    console.log(`[${this.name}]`, ...args);
+  }
+
+  enqueueMessage(data) {
+    if (this.messageQueue.length >= this.messageQueueMaxSize) {
+      const dropped = this.messageQueue.shift();
+      this.log(`⚠️  消息队列已满，丢弃最旧消息: ${dropped?.id || 'unknown'}`);
     }
-  }
-}
-
-function wsSendImmediate(data) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    return false;
-  }
-  try {
-    ws.send(JSON.stringify(data));
-    return true;
-  } catch (err) {
-    console.error('❌ WebSocket 发送失败:', maskUrl(err.message));
-    return false;
-  }
-}
-
-function wsSend(data, { queue = true } = {}) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    return wsSendImmediate(data);
-  }
-  if (queue) {
-    enqueueMessage(data);
-    console.log('📥 连接未就绪，消息已加入队列');
-    return false;
-  }
-  console.warn('⚠️  WebSocket 未连接，丢弃消息');
-  return false;
-}
-
-function cleanupWs() {
-  if (ws) {
-    try {
-      ws.removeAllListeners();
-      ws.close();
-    } catch (_) { /* ignore */ }
-    ws = null;
-  }
-}
-
-function jitter(base) {
-  return Math.floor(base * (0.8 + Math.random() * 0.4));
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+    this.messageQueue.push(data);
   }
 
-  if (AGGRESSIVE_RECONNECT) {
-    const delay = jitter(RECONNECT_DELAY);
-    console.log(`🔄 快速重连模式，${Math.round(delay / 1000)}s 后重连...`);
-    reconnectTimer = setTimeout(() => {
-      try {
-        connectXiaozhi();
-      } catch (error) {
-        console.error('❌ 快速重连失败:', maskUrl(error.message));
-        scheduleReconnect();
+  flushMessageQueue() {
+    if (this.messageQueue.length === 0) return;
+    this.log(`📤 重连后发送 ${this.messageQueue.length} 条缓存消息`);
+    while (this.messageQueue.length > 0) {
+      const msg = this.messageQueue.shift();
+      if (!this.wsSendImmediate(msg)) {
+        this.messageQueue.unshift(msg);
+        break;
       }
-    }, delay);
-    return;
-  }
-
-  if (quickReconnectAttempts >= MAX_QUICK_RECONNECT) {
-    if (!isInInfiniteReconnectMode) {
-      isInInfiniteReconnectMode = true;
-      console.log(`🔄 快速重连次数已达上限(${MAX_QUICK_RECONNECT})，进入无限重连模式`);
     }
-    scheduleInfiniteReconnect();
-    return;
   }
 
-  const delay = Math.min(
-    RECONNECT_DELAY * Math.pow(2, quickReconnectAttempts),
-    RECONNECT_MAX_DELAY
-  );
-  console.log(`🔄 第 ${quickReconnectAttempts + 1}/${MAX_QUICK_RECONNECT} 次快速重连，${Math.round(delay / 1000)}s 后重试...`);
-  reconnectTimer = setTimeout(() => {
-    quickReconnectAttempts++;
+  wsSendImmediate(data) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
     try {
-      connectXiaozhi();
-    } catch (error) {
-      console.error('❌ 快速重连失败:', maskUrl(error.message));
-      scheduleReconnect();
+      this.ws.send(JSON.stringify(data));
+      return true;
+    } catch (err) {
+      this.log('❌ WebSocket 发送失败:', maskUrl(err.message));
+      return false;
     }
-  }, jitter(delay));
-}
-
-function scheduleInfiniteReconnect() {
-  infiniteRetryCount++;
-
-  if (MAX_INFINITE_RETRIES > 0 && infiniteRetryCount > MAX_INFINITE_RETRIES) {
-    console.log(`⏹️  已达到最大无限重连次数(${MAX_INFINITE_RETRIES})，停止重连`);
-    return;
   }
 
-  let delay;
-  if (infiniteRetryCount >= SLEEP_THRESHOLD && !isInSleepMode) {
-    isInSleepMode = true;
-    console.log(`😴 连续失败 ${SLEEP_THRESHOLD} 次，进入休眠模式`);
-  }
-
-  if (isInSleepMode) {
-    delay = SLEEP_INTERVAL;
-    console.log(`😴 休眠模式，${Math.round(delay / 60000)} 分钟后重连（第 ${infiniteRetryCount} 次）`);
-  } else {
-    delay = INFINITE_RECONNECT_DELAY;
-    console.log(`🔄 无限重连，${Math.round(delay / 60000)} 分钟后重试（第 ${infiniteRetryCount}/${MAX_INFINITE_RETRIES || '∞'} 次）`);
-  }
-
-  reconnectTimer = setTimeout(() => {
-    console.log(`🔄 进行无限重连尝试（第 ${infiniteRetryCount}/${MAX_INFINITE_RETRIES || '∞'} 次）...`);
-    try {
-      connectXiaozhi();
-    } catch (error) {
-      console.error('❌ 无限重连失败:', maskUrl(error.message));
-      scheduleInfiniteReconnect();
+  wsSend(data, { queue = true } = {}) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return this.wsSendImmediate(data);
     }
-  }, jitter(delay));
-}
-
-function handleIncomingMessage(raw) {
-  let msg;
-  try { msg = JSON.parse(raw.toString()); }
-  catch { return; }
-
-  if (msg.method === 'initialize') {
-    wsSend({
-      jsonrpc: '2.0',
-      result: {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'xiaozhi-mini', version: VERSION }
-      },
-      id: msg.id
-    });
-    return;
-  }
-
-  // MCP 协议初始化完成通知，静默处理
-  if (msg.method === 'notifications/initialized') {
-    return;
-  }
-
-  // 小智服务端 ping 保活探测，必须回复 pong（空 result）
-  // 不回复会导致服务端在30秒后断开连接（1006）
-  if (msg.method === 'ping') {
-    wsSend({ jsonrpc: '2.0', result: {}, id: msg.id });
-    return;
-  }
-
-  if (msg.method === 'tools/list') {
-    const tools = aggregateTools();
-    const payload = { jsonrpc: '2.0', result: { tools }, id: msg.id };
-    const payloadSize = JSON.stringify(payload).length;
-    console.log(`📤 推送 ${tools.length} 个工具给小智 (payload: ${Math.round(payloadSize / 1024)}KB)`);
-    if (payloadSize > 100000) {
-      console.warn(`⚠️  payload 过大 (${payloadSize} bytes)，可能导致连接断开`);
+    if (queue) {
+      this.enqueueMessage(data);
+      this.log('📥 连接未就绪，消息已加入队列');
+      return false;
     }
-    wsSend(payload);
-    return;
+    this.log('⚠️  WebSocket 未连接，丢弃消息');
+    return false;
   }
 
-  if (msg.method === 'tools/call') {
-    const toolName = msg.params?.name || '';
-    console.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
-    const underscoreIdx = toolName.indexOf('_');
-    if (underscoreIdx <= 0) {
-      wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
-      return;
-    }
-    const prefix = toolName.substring(0, underscoreIdx);
-    const realName = toolName.substring(underscoreIdx + 1);
-    const up = upstreams.get(prefix);
-
-    if (!up) {
-      wsSend({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id });
-      return;
-    }
-
-    (async () => {
+  cleanupWs() {
+    if (this.ws) {
       try {
-        let result;
-        if (up.type === 'streamable-http') {
-          const response = await postHA(
-            up,
-            'tools/call',
-            { name: realName, arguments: msg.params.arguments || {} },
-            msg.id
-          );
-          result = response.result;
-        } else if (up.type === 'stdio') {
-          result = await up.client.callTool({ name: realName, arguments: msg.params.arguments || {} });
+        this.ws.removeAllListeners();
+        this.ws.close();
+      } catch (_) { /* ignore */ }
+      this.ws = null;
+    }
+  }
+
+  jitter(base) {
+    return Math.floor(base * (0.8 + Math.random() * 0.4));
+  }
+
+  scheduleReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.aggressiveReconnect) {
+      const delay = this.jitter(this.reconnectDelay);
+      this.log(`🔄 快速重连模式，${Math.round(delay / 1000)}s 后重连...`);
+      this.reconnectTimer = setTimeout(() => {
+        try {
+          this.connect();
+        } catch (error) {
+          this.log('❌ 快速重连失败:', maskUrl(error.message));
+          this.scheduleReconnect();
         }
-        wsSend({ jsonrpc: '2.0', result, id: msg.id });
-        console.log(`🔧 ${toolName} → ok`);
-      } catch (err) {
-        console.error(`❌ ${toolName} 调用失败:`, maskUrl(err));
-        wsSend({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id });
-      }
-    })();
-    return;
-  }
-
-  if (msg.id && String(msg.id).startsWith('keepalive-')) {
-    console.log('💓 保活响应正常');
-    return;
-  }
-
-  console.log(`❓ 未知请求: method=${msg.method}`, JSON.stringify(msg).substring(0, 200));
-}
-
-function connectXiaozhi() {
-  isClosed = false;
-  cleanupWs();
-  console.log(`🔗 连接小智: ${maskUrl(XIAOZHI_URL)}`);
-
-  ws = new WebSocket(XIAOZHI_URL, {
-    perMessageDeflate: false,
-    handshakeTimeout: 10000,
-  });
-
-  ws.on('open', () => {
-    console.log('🟢 小智 WebSocket 已连接');
-    quickReconnectAttempts = 0;
-    isInInfiniteReconnectMode = false;
-    infiniteRetryCount = 0;
-    isInSleepMode = false;
-
-    try {
-      const notification = {
-        jsonrpc: '2.0',
-        method: 'notifications/tools/list_changed',
-      };
-      ws.send(JSON.stringify(notification));
-      console.log('📢 已通知小智工具列表更新');
-    } catch (e) {
-      console.warn('⚠️  通知工具列表更新失败:', maskUrl(e.message));
+      }, delay);
+      return;
     }
 
-    flushMessageQueue();
-  });
+    if (this.quickReconnectAttempts >= this.maxQuickReconnect) {
+      if (!this.isInInfiniteReconnectMode) {
+        this.isInInfiniteReconnectMode = true;
+        this.log(`🔄 快速重连次数已达上限(${this.maxQuickReconnect})，进入无限重连模式`);
+      }
+      this.scheduleInfiniteReconnect();
+      return;
+    }
 
-  ws.on('message', handleIncomingMessage);
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(2, this.quickReconnectAttempts),
+      this.reconnectMaxDelay
+    );
+    this.log(`🔄 第 ${this.quickReconnectAttempts + 1}/${this.maxQuickReconnect} 次快速重连，${Math.round(delay / 1000)}s 后重试...`);
+    this.reconnectTimer = setTimeout(() => {
+      this.quickReconnectAttempts++;
+      try {
+        this.connect();
+      } catch (error) {
+        this.log('❌ 快速重连失败:', maskUrl(error.message));
+        this.scheduleReconnect();
+      }
+    }, this.jitter(delay));
+  }
 
-  ws.on('close', () => {
-    if (isClosed) return;
-    isClosed = true;
-    console.log('🔴 小智连接断开');
-    scheduleReconnect();
-  });
+  scheduleInfiniteReconnect() {
+    this.infiniteRetryCount++;
 
-  ws.on('error', (err) => {
-    console.error('❌ WebSocket 错误:', maskUrl(err));
-  });
+    if (this.maxInfiniteRetries > 0 && this.infiniteRetryCount > this.maxInfiniteRetries) {
+      this.log(`⏹️  已达到最大无限重连次数(${this.maxInfiniteRetries})，停止重连`);
+      return;
+    }
+
+    let delay;
+    if (this.infiniteRetryCount >= this.sleepThreshold && !this.isInSleepMode) {
+      this.isInSleepMode = true;
+      this.log(`😴 连续失败 ${this.sleepThreshold} 次，进入休眠模式`);
+    }
+
+    if (this.isInSleepMode) {
+      delay = this.sleepInterval;
+      this.log(`😴 休眠模式，${Math.round(delay / 60000)} 分钟后重连（第 ${this.infiniteRetryCount} 次）`);
+    } else {
+      delay = this.infiniteReconnectDelay;
+      this.log(`🔄 无限重连，${Math.round(delay / 60000)} 分钟后重试（第 ${this.infiniteRetryCount}/${this.maxInfiniteRetries || '∞'} 次）`);
+    }
+
+    this.reconnectTimer = setTimeout(() => {
+      this.log(`🔄 进行无限重连尝试（第 ${this.infiniteRetryCount}/${this.maxInfiniteRetries || '∞'} 次）...`);
+      try {
+        this.connect();
+      } catch (error) {
+        this.log('❌ 无限重连失败:', maskUrl(error.message));
+        this.scheduleInfiniteReconnect();
+      }
+    }, this.jitter(delay));
+  }
+
+  handleIncomingMessage(raw) {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); }
+    catch { return; }
+
+    if (msg.method === 'initialize') {
+      this.wsSend({
+        jsonrpc: '2.0',
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'xiaozhi-mini', version: VERSION }
+        },
+        id: msg.id
+      });
+      return;
+    }
+
+    // MCP 协议初始化完成通知，静默处理
+    if (msg.method === 'notifications/initialized') {
+      return;
+    }
+
+    // 小智服务端 ping 保活探测，必须回复 pong（空 result）
+    // 不回复会导致服务端在30秒后断开连接（1006）
+    if (msg.method === 'ping') {
+      this.wsSend({ jsonrpc: '2.0', result: {}, id: msg.id });
+      return;
+    }
+
+    if (msg.method === 'tools/list') {
+      const tools = aggregateTools();
+      const payload = { jsonrpc: '2.0', result: { tools }, id: msg.id };
+      const payloadSize = JSON.stringify(payload).length;
+      this.log(`📤 推送 ${tools.length} 个工具给小智 (payload: ${Math.round(payloadSize / 1024)}KB)`);
+      if (payloadSize > 100000) {
+        this.log(`⚠️  payload 过大 (${payloadSize} bytes)，可能导致连接断开`);
+      }
+      this.wsSend(payload);
+      return;
+    }
+
+    if (msg.method === 'tools/call') {
+      const toolName = msg.params?.name || '';
+      this.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
+      const underscoreIdx = toolName.indexOf('_');
+      if (underscoreIdx <= 0) {
+        this.wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
+        return;
+      }
+      const prefix = toolName.substring(0, underscoreIdx);
+      const realName = toolName.substring(underscoreIdx + 1);
+      const up = upstreams.get(prefix);
+
+      if (!up) {
+        this.wsSend({ jsonrpc: '2.0', error: { code: -32601, message: `unknown upstream: ${prefix}` }, id: msg.id });
+        return;
+      }
+
+      // 哪个连接收到请求，就用这个连接回复（捕获 this）
+      (async () => {
+        try {
+          let result;
+          if (up.type === 'streamable-http') {
+            const response = await postHA(
+              up,
+              'tools/call',
+              { name: realName, arguments: msg.params.arguments || {} },
+              msg.id
+            );
+            result = response.result;
+          } else if (up.type === 'stdio') {
+            result = await up.client.callTool({ name: realName, arguments: msg.params.arguments || {} });
+          }
+          this.wsSend({ jsonrpc: '2.0', result, id: msg.id });
+          this.log(`🔧 ${toolName} → ok`);
+        } catch (err) {
+          this.log(`❌ ${toolName} 调用失败:`, maskUrl(err));
+          this.wsSend({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id });
+        }
+      })();
+      return;
+    }
+
+    if (msg.id && String(msg.id).startsWith('keepalive-')) {
+      this.log('💓 保活响应正常');
+      return;
+    }
+
+    this.log(`❓ 未知请求: method=${msg.method}`, JSON.stringify(msg).substring(0, 200));
+  }
+
+  connect() {
+    this.isClosed = false;
+    this.cleanupWs();
+    this.log(`🔗 连接小智: ${maskUrl(this.url)}`);
+
+    this.ws = new WebSocket(this.url, {
+      perMessageDeflate: false,
+      handshakeTimeout: 10000,
+    });
+
+    this.ws.on('open', () => {
+      this.log('🟢 小智 WebSocket 已连接');
+      this.quickReconnectAttempts = 0;
+      this.isInInfiniteReconnectMode = false;
+      this.infiniteRetryCount = 0;
+      this.isInSleepMode = false;
+
+      // 连接建立后必须通知工具列表更新，否则小智不会主动拉取
+      try {
+        const notification = {
+          jsonrpc: '2.0',
+          method: 'notifications/tools/list_changed',
+        };
+        this.ws.send(JSON.stringify(notification));
+        this.log('📢 已通知小智工具列表更新');
+      } catch (e) {
+        this.log('⚠️  通知工具列表更新失败:', maskUrl(e.message));
+      }
+
+      this.flushMessageQueue();
+    });
+
+    this.ws.on('message', (raw) => this.handleIncomingMessage(raw));
+
+    this.ws.on('close', () => {
+      if (this.isClosed) return;
+      this.isClosed = true;
+      this.log('🔴 小智连接断开');
+      this.scheduleReconnect();
+    });
+
+    this.ws.on('error', (err) => {
+      this.log('❌ WebSocket 错误:', maskUrl(err));
+    });
+  }
+
+  cleanup() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.isClosed = true;
+    this.cleanupWs();
+  }
+}
+
+// ── 组装小智连接列表 ─────────────────────────────────────
+// 优先级：
+// 1. config.xiaozhi.tokens（数组，多个 token，新功能，每项支持 ${ENV} 插值）
+// 2. config.xiaozhi.url（完整 URL，含 token，单连接，向后兼容）
+// 3. 环境变量 XIAOZHI_TOKEN（单 token，向后兼容）
+function buildXiaozhiConnections() {
+  const connCfg = {
+    reconnect_delay: RECONNECT_DELAY,
+    reconnect_max_delay: RECONNECT_MAX_DELAY,
+    message_queue_max: MESSAGE_QUEUE_MAX_SIZE,
+    aggressive_reconnect: AGGRESSIVE_RECONNECT,
+    max_quick_reconnect: MAX_QUICK_RECONNECT,
+    infinite_reconnect_delay: INFINITE_RECONNECT_DELAY,
+    max_infinite_retries: MAX_INFINITE_RETRIES,
+    sleep_threshold: SLEEP_THRESHOLD,
+    sleep_interval: SLEEP_INTERVAL,
+  };
+
+  const connections = [];
+
+  // 1. 多 token 模式
+  const rawTokens = config.xiaozhi?.tokens;
+  if (Array.isArray(rawTokens) && rawTokens.length > 0) {
+    rawTokens.forEach((rawToken, idx) => {
+      const token = interpolateEnv(rawToken);
+      if (!token || token === 'REPLACE_WITH_YOUR_TOKEN') {
+        console.warn(`⚠️  第 ${idx + 1} 个 token 为空或占位符，跳过`);
+        return;
+      }
+      const separator = XIAOZHI_BASE_URL.includes('?') ? '&' : '?';
+      const url = `${XIAOZHI_BASE_URL}${separator}token=${token}`;
+      connections.push(new XiaozhiConnection(`xiaozhi-${idx + 1}`, url, connCfg));
+    });
+    if (connections.length > 0) return connections;
+    console.error('❌ config.xiaozhi.tokens 配置了但没有有效 token');
+  }
+
+  // 2. 完整 URL 模式（向后兼容）
+  const cfgUrl = config.xiaozhi?.url;
+  if (cfgUrl && !cfgUrl.includes('REPLACE_WITH_YOUR_TOKEN') && !cfgUrl.includes('YOUR_TOKEN')) {
+    connections.push(new XiaozhiConnection('xiaozhi-1', interpolateEnv(cfgUrl), connCfg));
+    return connections;
+  }
+
+  // 3. 单 token 环境变量（向后兼容）
+  const XIAOZHI_TOKEN = process.env.XIAOZHI_TOKEN || '';
+  if (XIAOZHI_TOKEN && XIAOZHI_TOKEN !== 'REPLACE_WITH_YOUR_TOKEN') {
+    const separator = XIAOZHI_BASE_URL.includes('?') ? '&' : '?';
+    const url = `${XIAOZHI_BASE_URL}${separator}token=${XIAOZHI_TOKEN}`;
+    connections.push(new XiaozhiConnection('xiaozhi-1', url, connCfg));
+    return connections;
+  }
+
+  console.error('❌ 请先配置小智 token：');
+  console.error('   方式一（多 token，推荐）：在 config.yaml 中配置 xiaozhi.tokens 数组，用 ${XIAOZHI_TOKEN_1} 等环境变量');
+  console.error('   方式二（单 token）：复制 .env.example 为 .env，填入 XIAOZHI_TOKEN');
+  console.error('   方式三：在环境变量中设置 XIAOZHI_TOKEN');
+  process.exit(1);
 }
 
 // ── 4. 优雅退出 ────────────────────────────────────────────
+let xiaozhiConnections = [];
+
 function gracefulShutdown(signal) {
   console.log(`\n收到 ${signal}，正在退出...`);
-  clearTimeout(reconnectTimer);
-  cleanupWs();
+  if (upstreamRetryTimer) {
+    clearInterval(upstreamRetryTimer);
+    upstreamRetryTimer = null;
+  }
+  for (const conn of xiaozhiConnections) {
+    try {
+      conn.cleanup();
+    } catch (_) { /* ignore */ }
+  }
   // 关闭所有 stdio upstream
   for (const [name, up] of upstreams) {
     if (up.type === 'stdio' && up.transport) {
@@ -579,4 +715,12 @@ await initUpstreams();
 const totalTools = [...upstreams.values()].reduce((sum, u) => sum + u.tools.length, 0);
 const errCount = [...upstreams.values()].filter(u => u.error).length;
 console.log(`📦 ${upstreams.size} 个 upstream，${totalTools} 个工具${errCount ? `，${errCount} 个失败` : ''}`);
-connectXiaozhi();
+
+xiaozhiConnections = buildXiaozhiConnections();
+console.log(`🔗 准备启动 ${xiaozhiConnections.length} 个小智连接`);
+for (const conn of xiaozhiConnections) {
+  conn.connect();
+}
+
+// 启动 upstream 失败自动重连
+startUpstreamRetry();

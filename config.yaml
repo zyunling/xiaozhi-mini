@@ -28,6 +28,14 @@ xiaozhi:
   # 消息队列最大长度，断开期间缓存的消息数上限（默认 100）
   # message_queue_max: 100
   #
+  # 单 token（向后兼容）：在 .env 中设置 XIAOZHI_TOKEN 即可，无需在此配置
+  #
+  # 多 token（新功能，同时连接多个小智接入）：
+  # 每项支持 ${ENV} 插值，token 在 .env 中配置，避免泄露到配置文件
+  # tokens:
+  #   - ${XIAOZHI_TOKEN_1}
+  #   - ${XIAOZHI_TOKEN_2}
+  #
   # 如需要完整 URL 覆盖（不推荐，token 会写在配置里），可取消下一行注释：
   # url: "wss://api.xiaozhi.me/mcp/?token=YOUR_TOKEN"
 
@@ -35,7 +43,7 @@ upstreams:
   # ── HA-MCP（你的空调/灯光/传感器）──────────────────────
   ha:
     type: streamable-http
-    url: "http://192.168.199.8:9583/REPLACE_WITH_YOUR_TOKEN"
+    url: "http://192.168.199.8:9583/${HA_TOKEN}"
     headers:
       Accept: "application/json, text/event-stream"
 
@@ -66,15 +74,6 @@ upstreams:
   #   type: stdio
   #   command: "npx"
   #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-  # 示例5：云端闹钟（倒计时/定时/重复）
-  # alarm:
-  #   type: stdio
-  #   command: "node"
-  #   args: ["alarm-server.mjs"]
-  #   cwd: /app
-  #   env:
-  #     ALARM_DATA_DIR: /app/data
 
   # 示例4：高德地图（需要 API Key）
   # amap:

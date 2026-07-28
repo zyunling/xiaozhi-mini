@@ -12,7 +12,6 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./memory-data:/workspaces
-      - ./alarm-data:/app/data
 
     # 内存限制（128MB 绰绰有余）
     deploy:

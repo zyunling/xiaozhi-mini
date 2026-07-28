@@ -16,7 +16,8 @@
 - 📝 **YAML 配置**：加 MCP 工具只需改 config.yaml + restart
 - 🔒 **密钥分离**：Token 独立在 `.env` 文件，避免误提交
 - 🔒 **日志脱敏**：自动遮蔽 URL 中的 token，避免密钥泄露到日志
-- ⏰ **内置闹钟**：支持倒计时/定时/重复闹钟，语音设置，数据持久化
+- 🔗 **多接入支持**：一个实例同时连接多个小智 token，工具列表共享
+- 🔄 **upstream 自愈**：upstream 初始化失败后每 60 秒自动重试，无需手动 restart
 
 ## 🚀 快速开始
 
@@ -71,8 +72,15 @@ docker logs -f xiaozhi-mini
 ### `.env` — 密钥配置
 
 ```env
-# 小智 MCP 连接 Token（从小智后台获取）
+# 小智 MCP 连接 Token（单 token，向后兼容）
 XIAOZHI_TOKEN=your_token_here
+
+# 多 token（在 config.yaml 中配置 xiaozhi.tokens 数组时使用）
+# XIAOZHI_TOKEN_1=your_first_token
+# XIAOZHI_TOKEN_2=your_second_token
+
+# Home Assistant 长期访问令牌
+HA_TOKEN=your_ha_long_lived_token
 
 # 可选：其他 MCP Server 的 API Key
 # TAVILY_API_KEY=your_tavily_key
@@ -83,15 +91,17 @@ XIAOZHI_TOKEN=your_token_here
 ```yaml
 xiaozhi:
   base_url: "wss://api.xiaozhi.me/mcp/"
-  # 快速重连延迟（ms），默认 2s
-  # reconnect_delay: 2000
-  # 是否启用快速重连模式（默认 true）
-  # aggressive_reconnect: true
+  # 单 token：在 .env 中设置 XIAOZHI_TOKEN 即可
+  # 多 token（新功能）：取消注释，在 .env 中配置对应的 TOKEN 变量
+  # tokens:
+  #   - ${XIAOZHI_TOKEN_1}
+  #   - ${XIAOZHI_TOKEN_2}
+  # aggressive_reconnect: true  # 快速重连模式（默认 true）
 
 upstreams:
   ha:
     type: streamable-http
-    url: "http://HA_IP:PORT/private_/mcp"
+    url: "http://HA_IP:PORT/${HA_TOKEN}"
     headers:
       Accept: "application/json, text/event-stream"
 
@@ -113,6 +123,7 @@ upstreams:
 | 字段 | 说明 |
 |------|------|
 | `xiaozhi.base_url` | 小智 MCP endpoint 基础地址（token 从 `.env` 注入） |
+| `xiaozhi.tokens` | 多 token 数组，每项支持 `${VAR}` 插值，同时连接多个小智接入 |
 | `xiaozhi.reconnect_delay` | 快速重连延迟（ms），默认 2000 |
 | `xiaozhi.aggressive_reconnect` | 快速重连模式（默认 true），关闭后启用指数退避→无限重连→休眠 |
 | `xiaozhi.max_quick_reconnect` | 快速重连最大次数（默认 10），超限后进入无限重连 |
@@ -146,52 +157,6 @@ docker compose restart
 ⚠️  payload 接近上限(40000)，已截断到 X 个工具
 ```
 
-## ⏰ 内置闹钟功能
-
-xiaozhi-mini 内置了一个云端闹钟 MCP 服务，支持通过语音设置闹钟。
-
-### 启用方法
-
-在 `config.yaml` 的 `upstreams` 中取消注释：
-
-```yaml
-alarm:
-  type: stdio
-  command: "node"
-  args: ["alarm-server.mjs"]
-  cwd: /app
-```
-
-然后重启：
-
-```bash
-docker compose restart
-```
-
-### 支持的功能
-
-| 功能 | 说明 | 示例语音 |
-|------|------|----------|
-| 倒计时闹钟 | 设置多少秒/分钟后提醒 | "5分钟后提醒我开会" |
-| 定时闹钟 | 设置指定时间提醒 | "明天早上8点叫我起床" |
-| 重复闹钟 | 每天/每周重复 | "每天早上7点半提醒我吃早餐" |
-| 间隔提醒 | 每隔一段时间提醒 | "每小时提醒我喝水" |
-| 查询闹钟 | 查看所有设置中的闹钟 | "现在有什么闹钟" |
-| 删除闹钟 | 删除指定闹钟 | "取消1号闹钟" |
-
-### 工具说明
-
-- `alarm_create` - 创建闹钟
-- `alarm_list` - 查询闹钟列表
-- `alarm_delete` - 删除指定 ID 的闹钟
-- `alarm_clear_all` - 清除所有闹钟
-
-### 数据持久化
-
-闹钟数据保存在 `./alarm-data/alarms.json`，容器重启后不会丢失。
-
-> ⚠️ **注意**：这是**云端闹钟**，运行在 xiaozhi-mini 服务器上。提醒方式为：当你下次和小智对话时，如果有已到时间的闹钟，会自动告知你。如需主动响铃提醒，需要设备端固件支持（可考虑刷入带闹钟功能的第三方固件）。
-
 ## 📊 对比 MCPHub
 
 | 指标 | MCPHub | xiaozhi-mini |
@@ -202,6 +167,8 @@ docker compose restart
 | 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
 | 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 |
 | Payload 控制 | 无 | 自动截断，40KB 上限 |
+| 多接入 | 不支持 | 一个实例连接多个小智 token |
+| upstream 自愈 | 无 | 失败后每 60 秒自动重试 |
 | 密钥管理 | 写在配置文件 | 独立 `.env` + `${VAR}` 插值 |
 
 ## 🗺️ Roadmap
