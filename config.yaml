@@ -1,19 +1,22 @@
 # ============================================================
-# xiaozhi-mini v2.5 配置
-# 改完这个文件后 docker restart xiaozhi-mini 生效
-# token 请在 .env 文件中配置（XIAOZHI_TOKEN=xxx）
+# xiaozhi-mini v2.6 配置
+# 改完 .env 后 docker compose restart 生效
+# 所有 token/url 在 .env 文件中配置，此文件一般不用改
 # ============================================================
 
 xiaozhi:
-  # 小智 MCP 服务 base URL（一般不用改）
-  base_url: "wss://api.xiaozhi.me/mcp/"
+  # 单个接入：从 .env 读取完整 wss URL
+  url: "${XIAOZHI_URL}"
+
+  # 多个接入（可选，取消注释即可同时连接多个小智）：
+  # urls:
+  #   - "${XIAOZHI_URL_1}"
+  #   - "${XIAOZHI_URL_2}"
+
+  # ── 重连参数（一般不用改）──────────────────────────────
   # 快速重连延迟（ms），默认 2s
   # reconnect_delay: 2000
-  # 快速重连最大延迟（ms），默认 60s
-  # reconnect_max_delay: 60000
   # 是否启用快速重连模式（默认 true）
-  # 启用后：固定间隔快速重连，适合小智官方 endpoint
-  # 关闭后：指数退避 → 无限重连 → 休眠模式
   # aggressive_reconnect: true
   # 快速重连最大尝试次数（默认 10）
   # max_quick_reconnect: 10
@@ -27,28 +30,23 @@ xiaozhi:
   # sleep_interval: 7200000
   # 消息队列最大长度，断开期间缓存的消息数上限（默认 100）
   # message_queue_max: 100
-  #
-  # 单 token（向后兼容）：在 .env 中设置 XIAOZHI_TOKEN 即可，无需在此配置
-  #
-  # 多 token（新功能，同时连接多个小智接入）：
-  # 每项支持 ${ENV} 插值，token 在 .env 中配置，避免泄露到配置文件
-  # tokens:
-  #   - ${XIAOZHI_TOKEN_1}
-  #   - ${XIAOZHI_TOKEN_2}
-  #
-  # 如需要完整 URL 覆盖（不推荐，token 会写在配置里），可取消下一行注释：
-  # url: "wss://api.xiaozhi.me/mcp/?token=YOUR_TOKEN"
 
 upstreams:
-  # ── HA-MCP（你的空调/灯光/传感器）──────────────────────
+  # ── Home Assistant（空调/灯光/传感器）──────────────────
+  # 完整地址在 .env 中配置：HA_MCP_URL=http://IP:PORT/TOKEN
   ha:
     type: streamable-http
-    url: "http://192.168.199.8:9583/${HA_TOKEN}"
+    url: "${HA_MCP_URL}"
     headers:
       Accept: "application/json, text/event-stream"
 
-  # ── 下面是示例，取消注释就能用 ──────────────────────────
+  # ── 必应中文搜索 ──────────────────────────────────────
+  bing-search:
+    type: stdio
+    command: "npx"
+    args: ["-y", "bing-cn-mcp"]
 
+  # ── 知识图谱长期记忆 ──────────────────────────────────
   memory:
     type: stdio
     command: "npx"
@@ -56,26 +54,29 @@ upstreams:
     env:
       MEMORY_FILE_PATH: /workspaces/memory.jsonl
 
-  # 示例1：Tavily 搜索（需要 API Key）
-  # tavily:
-  #   type: streamable-http
-  #   url: "https://api.tavily.com/mcp"
-  #   headers:
-  #     Authorization: "Bearer ${TAVILY_API_KEY}"
+  # ── Tavily 搜索 ───────────────────────────────────────
+  # API Key 在 .env 中配置：TAVILY_API_KEY=your_key
+  tavily:
+    type: streamable-http
+    url: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
+    headers:
+      Accept: "application/json, text/event-stream"
 
-  # 示例2：Sequential Thinking（本地 stdio 进程）
+  # ── 以下为示例，取消注释即可启用 ──────────────────────
+
+  # Sequential Thinking（本地 stdio 进程）
   # sequential:
   #   type: stdio
   #   command: "npx"
   #   args: ["-y", "@anthropic-ai/sequential-thinking"]
 
-  # 示例3：文件系统（本地 stdio 进程）
+  # 文件系统（本地 stdio 进程）
   # filesystem:
   #   type: stdio
   #   command: "npx"
   #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-  # 示例4：高德地图（需要 API Key）
+  # 高德地图（需要 API Key）
   # amap:
   #   type: streamable-http
   #   url: "https://mcp.amap.com/mcp?key=YOUR_AMAP_KEY"

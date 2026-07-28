@@ -1,9 +1,10 @@
 /**
- * xiaozhi-mini v2.5
+ * xiaozhi-mini v2.6
  * 轻量 MCP 聚合桥：小智 wss(MCP) ↔ N 个 upstream MCP Server
  * streamable-http: 自己 fetch + SSE 解析（避开 SDK 路径问题）
  * stdio: 仍用 SDK StdioClientTransport（路径稳定）
- * 支持多个小智 token 同时连接（每 token 一个 XiaozhiConnection 实例）
+ * 支持多个小智接入（每个完整 wss URL 一个 XiaozhiConnection 实例）
+ * 所有 token/url 统一放在 .env，config.yaml 用 ${VAR} 引用
  */
 
 import WebSocket from 'ws';
@@ -15,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
@@ -62,8 +63,6 @@ const INFINITE_RECONNECT_DELAY = config.xiaozhi?.infinite_reconnect_delay || 180
 const MAX_INFINITE_RETRIES = config.xiaozhi?.max_infinite_retries || 48;
 const SLEEP_THRESHOLD = config.xiaozhi?.sleep_threshold || 12;
 const SLEEP_INTERVAL = config.xiaozhi?.sleep_interval || 7200000;
-
-const XIAOZHI_BASE_URL = config.xiaozhi?.base_url || 'wss://api.xiaozhi.me/mcp/';
 
 const upstreams = new Map();
 
@@ -622,10 +621,12 @@ class XiaozhiConnection {
 }
 
 // ── 组装小智连接列表 ─────────────────────────────────────
+// 所有 URL 都是从小智官方后台复制的完整 wss 链接（含 token），
+// 直接放在 .env 里，config.yaml 用 ${VAR} 引用，无需手动拆分 token。
+//
 // 优先级：
-// 1. config.xiaozhi.tokens（数组，多个 token，新功能，每项支持 ${ENV} 插值）
-// 2. config.xiaozhi.url（完整 URL，含 token，单连接，向后兼容）
-// 3. 环境变量 XIAOZHI_TOKEN（单 token，向后兼容）
+// 1. config.xiaozhi.urls（数组，多个完整 URL，每项支持 ${ENV} 插值）
+// 2. config.xiaozhi.url（单个完整 URL，支持 ${ENV} 插值）
 function buildXiaozhiConnections() {
   const connCfg = {
     reconnect_delay: RECONNECT_DELAY,
@@ -640,44 +641,38 @@ function buildXiaozhiConnections() {
   };
 
   const connections = [];
+  const isPlaceholder = (v) => !v || v.includes('REPLACE_WITH_YOUR_TOKEN') || v.includes('YOUR_TOKEN');
 
-  // 1. 多 token 模式
-  const rawTokens = config.xiaozhi?.tokens;
-  if (Array.isArray(rawTokens) && rawTokens.length > 0) {
-    rawTokens.forEach((rawToken, idx) => {
-      const token = interpolateEnv(rawToken);
-      if (!token || token === 'REPLACE_WITH_YOUR_TOKEN') {
-        console.warn(`⚠️  第 ${idx + 1} 个 token 为空或占位符，跳过`);
+  // 1. 多 URL 模式（多个小智接入）
+  const rawUrls = config.xiaozhi?.urls;
+  if (Array.isArray(rawUrls) && rawUrls.length > 0) {
+    rawUrls.forEach((rawUrl, idx) => {
+      const url = interpolateEnv(rawUrl);
+      if (isPlaceholder(url)) {
+        console.warn(`⚠️  第 ${idx + 1} 个 url 为空或占位符，跳过`);
         return;
       }
-      const separator = XIAOZHI_BASE_URL.includes('?') ? '&' : '?';
-      const url = `${XIAOZHI_BASE_URL}${separator}token=${token}`;
+      if (!url.startsWith('wss://') && !url.startsWith('ws://')) {
+        console.warn(`⚠️  第 ${idx + 1} 个 url 不是有效的 ws/wss 链接，跳过`);
+        return;
+      }
       connections.push(new XiaozhiConnection(`xiaozhi-${idx + 1}`, url, connCfg));
     });
     if (connections.length > 0) return connections;
-    console.error('❌ config.xiaozhi.tokens 配置了但没有有效 token');
+    console.error('❌ config.xiaozhi.urls 配置了但没有有效 url');
   }
 
-  // 2. 完整 URL 模式（向后兼容）
-  const cfgUrl = config.xiaozhi?.url;
-  if (cfgUrl && !cfgUrl.includes('REPLACE_WITH_YOUR_TOKEN') && !cfgUrl.includes('YOUR_TOKEN')) {
-    connections.push(new XiaozhiConnection('xiaozhi-1', interpolateEnv(cfgUrl), connCfg));
+  // 2. 单 URL 模式（从 .env 读取完整 wss URL）
+  const cfgUrl = interpolateEnv(config.xiaozhi?.url);
+  if (cfgUrl && !isPlaceholder(cfgUrl) &&
+      (cfgUrl.startsWith('wss://') || cfgUrl.startsWith('ws://'))) {
+    connections.push(new XiaozhiConnection('xiaozhi-1', cfgUrl, connCfg));
     return connections;
   }
 
-  // 3. 单 token 环境变量（向后兼容）
-  const XIAOZHI_TOKEN = process.env.XIAOZHI_TOKEN || '';
-  if (XIAOZHI_TOKEN && XIAOZHI_TOKEN !== 'REPLACE_WITH_YOUR_TOKEN') {
-    const separator = XIAOZHI_BASE_URL.includes('?') ? '&' : '?';
-    const url = `${XIAOZHI_BASE_URL}${separator}token=${XIAOZHI_TOKEN}`;
-    connections.push(new XiaozhiConnection('xiaozhi-1', url, connCfg));
-    return connections;
-  }
-
-  console.error('❌ 请先配置小智 token：');
-  console.error('   方式一（多 token，推荐）：在 config.yaml 中配置 xiaozhi.tokens 数组，用 ${XIAOZHI_TOKEN_1} 等环境变量');
-  console.error('   方式二（单 token）：复制 .env.example 为 .env，填入 XIAOZHI_TOKEN');
-  console.error('   方式三：在环境变量中设置 XIAOZHI_TOKEN');
+  console.error('❌ 请先配置小智 URL：');
+  console.error('   方式一（多接入）：在 config.yaml 中取消注释 xiaozhi.urls，并在 .env 中设置 XIAOZHI_URL_1、XIAOZHI_URL_2');
+  console.error('   方式二（单接入）：在 .env 中设置 XIAOZHI_URL 为从小智后台复制的完整 wss 链接');
   process.exit(1);
 }
 

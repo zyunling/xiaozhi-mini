@@ -30,12 +30,13 @@ cd xiaozhi-mini
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入你的 token 和 API Key
-# XIAOZHI_TOKEN=你的小智token
-# TAVILY_API_KEY=你的tavily_key（可选）
+# 编辑 .env，把从小智后台复制的完整 wss 链接、HA 完整地址、Tavily Key 粘贴进去
+# XIAOZHI_URL=wss://api.xiaozhi.me/mcp/?token=你的token
+# HA_MCP_URL=http://HA_IP:PORT/你的HA长期令牌
+# TAVILY_API_KEY=你的tavily_key
 ```
 
-2. 编辑 `config.yaml`，配置 upstream MCP Server
+2. （可选）编辑 `config.yaml` 调整 upstream，默认已启用 HA / bing-search / memory / tavily 四个
 
 ```bash
 vim config.yaml
@@ -56,74 +57,88 @@ docker logs -f xiaozhi-mini
 正常启动日志：
 
 ```text
-🚀 xiaozhi-mini v2.5.0 启动中...
+🚀 xiaozhi-mini v2.6.0 启动中...
 ✅ [ha] streamable-http: 14 个工具
-✅ [memory] stdio: 9 个工具 (PID: 16)
+✅ [bing-search] stdio: 5 个工具 (PID: 16)
+✅ [memory] stdio: 9 个工具 (PID: 28)
 ✅ [tavily] streamable-http: 5 个工具
-📦 3 个 upstream，28 个工具
-🔗 连接小智: wss://api.xiaozhi.me/mcp/?token=***
-🟢 小智 WebSocket 已连接
-📢 已通知小智工具列表更新
-📤 推送 28 个工具给小智 (payload: 37KB)
+📦 4 个 upstream，33 个工具
+🔗 准备启动 1 个小智连接
+[xiaozhi-1] 🔗 连接小智: wss://api.xiaozhi.me/mcp/?token=***
+[xiaozhi-1] 🟢 小智 WebSocket 已连接
+[xiaozhi-1] 📢 已通知小智工具列表更新
+[xiaozhi-1] 📤 推送 33 个工具给小智 (payload: 38KB)
 ```
 
 ## ⚙️ 配置说明
 
-### `.env` — 密钥配置
+### `.env` — 密钥与地址配置
+
+所有 token / URL 都放在 `.env`，避免不同用户地址不一样还要改 `config.yaml`。直接把官方后台复制到的完整链接粘进来即可，无需手动拆分 token。
 
 ```env
-# 小智 MCP 连接 Token（单 token，向后兼容）
-XIAOZHI_TOKEN=your_token_here
+# ── 小智 MCP 连接 ──────────────────────────────────────────
+# 从小智官方后台复制完整的 wss 链接，直接粘贴进来
+# 单个接入：
+XIAOZHI_URL=wss://api.xiaozhi.me/mcp/?token=你的token
 
-# 多 token（在 config.yaml 中配置 xiaozhi.tokens 数组时使用）
-# XIAOZHI_TOKEN_1=your_first_token
-# XIAOZHI_TOKEN_2=your_second_token
+# 多个接入（可选，取消注释后在 config.yaml 中启用 xiaozhi.urls）：
+# XIAOZHI_URL_1=wss://api.xiaozhi.me/mcp/?token=your_first_token
+# XIAOZHI_URL_2=wss://api.xiaozhi.me/mcp/?token=your_second_token
 
-# Home Assistant 长期访问令牌
-HA_TOKEN=your_ha_long_lived_token
+# ── Home Assistant MCP ─────────────────────────────────────
+# 填入你的 HA 完整 MCP 地址（含长期访问令牌）
+HA_MCP_URL=http://192.168.1.100:9583/你的HA长期令牌
 
-# 可选：其他 MCP Server 的 API Key
-# TAVILY_API_KEY=your_tavily_key
+# ── Tavily 搜索 ────────────────────────────────────────────
+# 从 https://tavily.com 获取 API Key
+TAVILY_API_KEY=你的tavily_key
 ```
 
 ### `config.yaml` — 功能配置
 
+默认已启用 HA、bing-search、memory、tavily 四个 upstream，所有 URL/Key 通过 `${VAR}` 引用 `.env`，此文件一般不用改。
+
 ```yaml
 xiaozhi:
-  base_url: "wss://api.xiaozhi.me/mcp/"
-  # 单 token：在 .env 中设置 XIAOZHI_TOKEN 即可
-  # 多 token（新功能）：取消注释，在 .env 中配置对应的 TOKEN 变量
-  # tokens:
-  #   - ${XIAOZHI_TOKEN_1}
-  #   - ${XIAOZHI_TOKEN_2}
-  # aggressive_reconnect: true  # 快速重连模式（默认 true）
+  # 单个接入：从 .env 读取完整 wss URL
+  url: "${XIAOZHI_URL}"
+
+  # 多个接入（可选，取消注释即可同时连接多个小智）：
+  # urls:
+  #   - "${XIAOZHI_URL_1}"
+  #   - "${XIAOZHI_URL_2}"
 
 upstreams:
   ha:
     type: streamable-http
-    url: "http://HA_IP:PORT/${HA_TOKEN}"
+    url: "${HA_MCP_URL}"
     headers:
       Accept: "application/json, text/event-stream"
+
+  bing-search:
+    type: stdio
+    command: "npx"
+    args: ["-y", "bing-cn-mcp"]
 
   memory:
     type: stdio
     command: "npx"
     args: ["-y", "@modelcontextprotocol/server-memory"]
     env:
-      MEMORY_FILE_PATH: /tmp/memory.jsonl
+      MEMORY_FILE_PATH: /workspaces/memory.jsonl
 
-  # 支持环境变量插值：${VAR} 会自动替换为 .env 中的值
   tavily:
     type: streamable-http
-    url: "https://api.tavily.com/mcp"
+    url: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
     headers:
-      Authorization: "Bearer ${TAVILY_API_KEY}"
+      Accept: "application/json, text/event-stream"
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `xiaozhi.base_url` | 小智 MCP endpoint 基础地址（token 从 `.env` 注入） |
-| `xiaozhi.tokens` | 多 token 数组，每项支持 `${VAR}` 插值，同时连接多个小智接入 |
+| `xiaozhi.url` | 单个接入的完整 wss URL，从 `.env` 的 `XIAOZHI_URL` 注入 |
+| `xiaozhi.urls` | 多接入数组，每项是完整 wss URL（`${XIAOZHI_URL_1}` 等），一个实例连多个小智 |
 | `xiaozhi.reconnect_delay` | 快速重连延迟（ms），默认 2000 |
 | `xiaozhi.aggressive_reconnect` | 快速重连模式（默认 true），关闭后启用指数退避→无限重连→休眠 |
 | `xiaozhi.max_quick_reconnect` | 快速重连最大次数（默认 10），超限后进入无限重连 |
@@ -167,14 +182,15 @@ docker compose restart
 | 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
 | 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 |
 | Payload 控制 | 无 | 自动截断，40KB 上限 |
-| 多接入 | 不支持 | 一个实例连接多个小智 token |
+| 多接入 | 不支持 | 一个实例连接多个小智（`xiaozhi.urls`） |
 | upstream 自愈 | 无 | 失败后每 60 秒自动重试 |
-| 密钥管理 | 写在配置文件 | 独立 `.env` + `${VAR}` 插值 |
+| 密钥管理 | 写在配置文件 | 独立 `.env` + `${VAR}` 插值，完整 URL 直接粘贴 |
 
 ## 🗺️ Roadmap
 
-- [ ] 支持多个小智 endpoint 并发
-- [ ] upstream 失败自动重连（目前需 restart）
+- [x] 支持多个小智 endpoint 并发（v2.5+，`xiaozhi.urls`）
+- [x] upstream 失败自动重连（v2.5+，每 60 秒自愈）
+- [x] 密钥与配置分离，完整 URL 放 `.env`（v2.6）
 - [ ] 可选 Web UI（默认关闭，省内存）
 
 ## 📄 License
