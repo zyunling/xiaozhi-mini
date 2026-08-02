@@ -378,15 +378,21 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  // 3 个音源 API
-  if (req.method === 'POST' && pathname === '/SearchMusicList') {
-    return handleSearch(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: [] }));
+  // 3 个音源 API（同时支持 POST 业务请求和 GET 健康检查）
+  if (pathname === '/SearchMusicList') {
+    if (req.method === 'GET' || req.method === 'POST') {
+      return handleSearch(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: [] }));
+    }
   }
-  if (req.method === 'POST' && pathname === '/SearchMusicRecommendedList') {
-    return handleRecommend(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: [] }));
+  if (pathname === '/SearchMusicRecommendedList') {
+    if (req.method === 'GET' || req.method === 'POST') {
+      return handleRecommend(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: [] }));
+    }
   }
-  if (req.method === 'GET'  && pathname === '/GetMusicDetail') {
-    return handleDetail(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: {} }));
+  if (pathname === '/GetMusicDetail') {
+    if (req.method === 'GET' || req.method === 'POST') {
+      return handleDetail(req, res).catch(e => sendJson(res, 500, { code: 500, message: e.message, data: {} }));
+    }
   }
 
   // 音频流代理

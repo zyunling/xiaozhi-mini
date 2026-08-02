@@ -56,6 +56,18 @@ upstreams:
     headers:
       Accept: "application/json, text/event-stream"
 
+  # ── Navidrome 音乐库（MCP 工具，绕开固件音源配置）─────────
+  # 启动 navidrome-mcp-server 后，小智云端 AI 可直接调用：
+  #   navidrome_search(query)            — 搜索歌曲
+  #   navidrome_get_stream_url(id)      — 获取播放流URL
+  #   navidrome_random_song(size)       — 随机推荐
+  # 然后用 self.music.play_url 播放，不需要固件音源配置
+  # navidrome:
+  #   type: streamable-http
+  #   url: "http://127.0.0.1:8660/mcp/"
+  #   headers:
+  #     Accept: "application/json, text/event-stream"
+
   # ── 以下为可选，取消注释即可启用 ──────────────────────
 
   # 必应中文搜索（stdio，约 40-50MB 内存，已用 Tavily 可不开）

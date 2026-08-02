@@ -49,3 +49,26 @@ services:
           memory: 96M
         reservations:
           memory: 32M
+
+  # ── Navidrome MCP 服务（供 xiaozhi-mini 作为 upstream 接入）─────
+  # 让小智云端 AI 能直接调用 navidrome_search / navidrome_get_stream_url
+  # 绕开固件自定义音源配置，用 self.music.play_url 播放
+  navidrome-mcp-server:
+    build: .
+    container_name: navidrome-mcp-server
+    restart: unless-stopped
+
+    entrypoint: ["node", "/app/navidrome-mcp-server.mjs"]
+
+    env_file:
+      - .env
+
+    ports:
+      - "8660:8660"
+
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+        reservations:
+          memory: 32M
