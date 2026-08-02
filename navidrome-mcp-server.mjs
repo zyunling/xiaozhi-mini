@@ -219,17 +219,22 @@ const TOOLS = {
 
   navidrome_get_stream_url: {
     name: 'navidrome_get_stream_url',
-    description: '【音乐播放-必须配合navidrome_search使用】获取歌曲的局域网HTTP播放流URL和歌词。当 navidrome_search 返回歌曲列表后，选择第一首或用户指定的歌曲，用其ID调用本工具获取播放URL。获取URL后，必须调用 self.music.play_url(url, song_name, artist, lyric) 来播放，其中 url 是返回的url字段，song_name是歌曲名，artist是歌手名，lyric是歌词。禁止使用 self.online_music.play_music。',
+    description: '【音乐播放-必须配合navidrome_search使用】获取歌曲的局域网HTTP播放流URL和歌词。当 navidrome_search 返回歌曲列表后，选择第一首或用户指定的歌曲，用其ID调用本工具获取播放URL。返回内容包含可直接播放的完整指令，请严格按照指令调用 self.music.play_url 播放。禁止使用 self.online_music.play_music。',
     inputSchema: {
       type: 'object',
       properties: {
         song_id: { type: 'string', description: '歌曲ID（从 navidrome_search 返回结果中获取）' },
+        song_name: { type: 'string', description: '歌曲名（从 navidrome_search 返回结果中获取）' },
+        artist: { type: 'string', description: '歌手名（从 navidrome_search 返回结果中获取）' },
       },
       required: ['song_id'],
     },
     async handler(params) {
       const result = await getStreamUrl(params.song_id);
-      const text = `调用 self.music.play_url("${result.url}", "歌曲名", "歌手名", "${result.lyric}") 来播放此歌曲。歌曲ID: ${result.id}`;
+      const songName = params.song_name || '未知歌曲';
+      const artist = params.artist || '未知歌手';
+      // 生成明确的播放指令，引导 AI 调用 self.music.play_url
+      const text = `已获取播放信息。\n\n必须立即调用 self.music.play_url 播放，参数如下：\n- url: ${result.url}\n- song_name: ${songName}\n- artist: ${artist}\n- lyric: ${result.lyric}\n\n请直接调用 self.music.play_url(url="${result.url}", song_name="${songName}", artist="${artist}", lyric="${result.lyric}") 完成播放。`;
       return { content: [{ type: 'text', text }] };
     },
   },
