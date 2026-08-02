@@ -219,7 +219,7 @@ const TOOLS = {
 
   navidrome_get_stream_url: {
     name: 'navidrome_get_stream_url',
-    description: '【音乐播放-必须配合navidrome_search使用】获取歌曲的局域网HTTP播放流URL和歌词。当 navidrome_search 返回歌曲列表后，选择第一首或用户指定的歌曲，用其ID调用本工具获取播放URL。返回内容包含可直接播放的完整指令，请严格按照指令调用 self.music.play_url 播放。禁止使用 self.online_music.play_music。',
+    description: '【音乐播放-必须配合navidrome_search使用】获取歌曲的播放信息。当 navidrome_search 返回歌曲列表后，选择第一首或用户指定的歌曲，用其ID调用本工具。返回内容包含歌曲名和歌手名，必须用这些信息调用 self.online_music.play_music 播放。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -233,8 +233,9 @@ const TOOLS = {
       const result = await getStreamUrl(params.song_id);
       const songName = params.song_name || '未知歌曲';
       const artist = params.artist || '未知歌手';
-      // 生成明确的播放指令，引导 AI 调用 self.music.play_url
-      const text = `已获取播放信息。\n\n必须立即调用 self.music.play_url 播放，参数如下：\n- url: ${result.url}\n- song_name: ${songName}\n- artist: ${artist}\n- lyric: ${result.lyric}\n\n请直接调用 self.music.play_url(url="${result.url}", song_name="${songName}", artist="${artist}", lyric="${result.lyric}") 完成播放。`;
+      // 引导 AI 用 play_type:song + 真实歌名调 play_music
+      // 因为固件 play_type:url 有bug，只能用 song 模式让固件自己搜索播放
+      const text = `已找到歌曲：${artist} - ${songName}\n\n必须立即调用 self.online_music.play_music 播放，参数如下：\n{\n  "play_type": "song",\n  "song_name": "${songName}"\n}\n\n注意：必须使用 play_type 为 "song"，song_name 为上述歌曲名。`;
       return { content: [{ type: 'text', text }] };
     },
   },
