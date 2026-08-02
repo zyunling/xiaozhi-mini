@@ -40,7 +40,8 @@ function loadEnvFile(filePath) {
       const key = trimmed.slice(0, eqIdx).trim();
       let val = trimmed.slice(eqIdx + 1).trim();
       if ((val.startsWith('"') && val.endsWith('"')) ||
-          (val.startsWith("'") && val.endsWith("'"))) {
+          (val.startsWith("'") && val.endsWith("'")) ||
+          (val.startsWith('`') && val.endsWith('`'))) {
         val = val.slice(1, -1);
       }
       if (!(key in process.env)) {
