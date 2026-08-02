@@ -258,7 +258,8 @@ const TOOLS = {
 };
 
 // ── MCP JSON-RPC 协议处理 ────────────────────────────────────
-let initialized = false;
+// 注意：xiaozhi-mini 的 streamable-http 客户端直接调 tools/list，
+// 不发 initialize，所以这里不强制要求初始化。
 
 function handleMCPRequest(req, res) {
   let body = '';
@@ -274,7 +275,6 @@ function handleMCPRequest(req, res) {
     const { method, params, id } = request;
 
     if (method === 'initialize') {
-      initialized = true;
       return sendJson(res, 200, {
         jsonrpc: '2.0',
         result: {
@@ -293,14 +293,6 @@ function handleMCPRequest(req, res) {
 
     if (method === 'notifications/initialized') {
       return sendJson(res, 202, {});
-    }
-
-    if (!initialized) {
-      return sendJson(res, 200, {
-        jsonrpc: '2.0',
-        error: { code: -32002, message: 'Server not initialized' },
-        id,
-      });
     }
 
     if (method === 'tools/list') {
