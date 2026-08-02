@@ -11,7 +11,7 @@ RUN npm install --omit=dev
 # 预装常用 MCP server（避免运行时 npx 下载超时）
 RUN npm install -g @modelcontextprotocol/server-memory 2>/dev/null || true
 
-COPY index.mjs .
+COPY index.mjs navidrome-music-bridge.mjs ./
 COPY config.yaml .
 
 USER node
