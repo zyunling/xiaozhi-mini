@@ -60,7 +60,9 @@ const MUSIC_BRIDGE_PORT    = parseInt(process.env.MUSIC_BRIDGE_PORT    || '8650'
 const MUSIC_BRIDGE_BIND_IP = process.env.MUSIC_BRIDGE_BIND_IP || '0.0.0.0';
 const MUSIC_BRIDGE_PUB_IP  = process.env.MUSIC_BRIDGE_PUB_IP  || getFirstLanIp();
 
-const BRIDGE_BASE = `http://${MUSIC_BRIDGE_PUB_IP}:${MUSIC_BRIDGE_PORT}`;
+// 支持公网域名 + HTTPS（反向代理场景）
+// 如果设了 MUSIC_BRIDGE_PUB_URL，直接用它作为 BRIDGE_BASE（如 https://music-bridge.example.com:17668）
+const BRIDGE_BASE = process.env.MUSIC_BRIDGE_PUB_URL || `http://${MUSIC_BRIDGE_PUB_IP}:${MUSIC_BRIDGE_PORT}`;
 
 // Navidrome Subsonic API 参数（固定）
 const SUBSONIC_CLIENT  = 'xiaozhi-wt512';
