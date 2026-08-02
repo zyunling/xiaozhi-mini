@@ -32,8 +32,18 @@ services:
 
     entrypoint: ["node", "/app/navidrome-music-bridge.mjs"]
 
+    # 先读 .env，再用 environment 覆盖（environment 优先级更高，用于强制指定）
     env_file:
       - .env
+    environment:
+      # 对外公布的公网URL（反向代理域名+端口），优先级最高，直接写死
+      MUSIC_BRIDGE_PUB_URL: "https://music-bridge.557668.xyz:17668"
+      # 对内访问 Navidrome 的内网地址（容器里能直接路由到宿主机内网IP）
+      NAVIDROME_URL: "http://192.168.199.2:4533"
+      NAVIDROME_USERNAME: "zyl"
+      NAVIDROME_PASSWORD: "zyl@18606057668"
+      MUSIC_BRIDGE_PORT: "8650"
+      MUSIC_BRIDGE_BIND_IP: "0.0.0.0"
 
     # BOX2（ESP32-S3）需要从局域网访问本服务，所以必须暴露端口
     # 这里 host 端口跟 MUSIC_BRIDGE_PORT 保持一致；改 .env 里 MUSIC_BRIDGE_PORT 后也要改这里
@@ -62,6 +72,12 @@ services:
 
     env_file:
       - .env
+    environment:
+      NAVIDROME_URL: "http://192.168.199.2:4533"
+      NAVIDROME_USERNAME: "zyl"
+      NAVIDROME_PASSWORD: "zyl@18606057668"
+      MUSIC_BRIDGE_PUB_URL: "https://music-bridge.557668.xyz:17668"
+      NAVIDROME_MCP_PORT: "8660"
 
     ports:
       - "8660:8660"
