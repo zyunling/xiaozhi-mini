@@ -192,7 +192,7 @@ async function randomSongs(size = 10) {
 const TOOLS = {
   navidrome_search: {
     name: 'navidrome_search',
-    description: '在 Navidrome 音乐库中搜索歌曲、歌手或专辑。返回匹配歌曲列表，包含歌曲ID、名称、歌手、专辑信息。',
+    description: '【音乐播放-必须优先使用】搜索用户的私人 Navidrome 音乐库。当用户说"播放xxx"、"来一首xxx"、"我想听xxx的歌"、"放音乐"等任何与播放音乐相关的请求时，必须优先调用本工具搜索歌曲，禁止直接调用 self.online_music.play_music。返回格式：序号. 歌手 - 歌曲名 (专辑) [ID:歌曲ID]。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -219,11 +219,11 @@ const TOOLS = {
 
   navidrome_get_stream_url: {
     name: 'navidrome_get_stream_url',
-    description: '获取歌曲的局域网HTTP播放流URL和歌词。返回的URL可直接用于self.music.play_url播放。',
+    description: '【音乐播放-必须配合navidrome_search使用】获取歌曲的局域网HTTP播放流URL和歌词。当 navidrome_search 返回歌曲列表后，选择第一首或用户指定的歌曲，用其ID调用本工具获取播放URL，然后用 self.music.play_url(url, 歌曲名, 歌手, 歌词) 播放。',
     inputSchema: {
       type: 'object',
       properties: {
-        song_id: { type: 'string', description: '歌曲ID（从 navidrome_search 获取）' },
+        song_id: { type: 'string', description: '歌曲ID（从 navidrome_search 返回结果中获取）' },
       },
       required: ['song_id'],
     },
@@ -236,7 +236,7 @@ const TOOLS = {
 
   navidrome_random_song: {
     name: 'navidrome_random_song',
-    description: '从 Navidrome 音乐库随机推荐歌曲，返回歌曲列表。',
+    description: '【音乐播放-随机推荐】从用户的私人 Navidrome 音乐库随机推荐歌曲。当用户说"随便来一首"、"放点音乐"、"来个随机的"等没有指定具体歌曲时使用。返回后用 navidrome_get_stream_url 获取URL再播放。',
     inputSchema: {
       type: 'object',
       properties: {
