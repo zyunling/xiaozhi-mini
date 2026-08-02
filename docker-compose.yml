@@ -4,7 +4,7 @@ services:
     container_name: xiaozhi-mini
     restart: unless-stopped
 
-    # 从 .env 文件读取环境变量（含小智 token）
+    # 从 .env 文件读取环境变量（含小智 token、Navidrome 配置）
     env_file:
       - .env
 
@@ -21,3 +21,31 @@ services:
           memory: 192M
         reservations:
           memory: 64M
+
+  # ── Navidrome 音乐桥接（wt512 固件自定义音源服务）───────────
+  # 提供3个接口：SearchMusicList / GetMusicDetail / SearchMusicRecommendedList
+  # + 音频流代理 + 歌词代理
+  navidrome-music-bridge:
+    build: .
+    container_name: navidrome-music-bridge
+    restart: unless-stopped
+
+    entrypoint: ["node", "/app/navidrome-music-bridge.mjs"]
+
+    env_file:
+      - .env
+
+    # BOX2（ESP32-S3）需要从局域网访问本服务，所以必须暴露端口
+    # 这里 host 端口跟 MUSIC_BRIDGE_PORT 保持一致；改 .env 里 MUSIC_BRIDGE_PORT 后也要改这里
+    ports:
+      - "8650:8650"
+
+    # network_mode: host  # 如果用的是 macOS Docker Desktop，且有多个网卡
+                             # 建议取消上面 ports 注释，改用 host 模式，避免 MUSIC_BRIDGE_PUB_IP
+                             # 取到 docker 内部 bridge IP 导致 BOX2 无法访问
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+        reservations:
+          memory: 32M
