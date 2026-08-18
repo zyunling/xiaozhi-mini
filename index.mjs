@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.6.0';
+const VERSION = '2.7.0';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
@@ -64,6 +64,18 @@ const INFINITE_RECONNECT_DELAY = config.xiaozhi?.infinite_reconnect_delay || 180
 const MAX_INFINITE_RETRIES = config.xiaozhi?.max_infinite_retries || 48;
 const SLEEP_THRESHOLD = config.xiaozhi?.sleep_threshold || 12;
 const SLEEP_INTERVAL = config.xiaozhi?.sleep_interval || 7200000;
+
+// ── 连接健康检查参数 ──────────────────────────────────────
+// 解决"静默断连"问题：WebSocket TCP 连接在中间网络设备（NAT/代理/负载均衡）
+// 处被静默回收时，ws 库不会触发 close 事件，客户端误以为连接仍然存活，
+// 导致工具列表不再推送。以下机制确保连接真正可用 + 工具定期自动重推。
+// health_check_interval: 健康检查周期（ms），默认 60s
+// stale_threshold: 连接静默阈值（ms），默认 300s（5 分钟）。
+//   小智服务端每 30s 发一次 JSON-RPC ping，5 分钟无任何消息 = 连接已死
+// tools_refresh_interval: 工具列表自动重推周期（ms），默认 1800000（30 分钟）
+const HEALTH_CHECK_INTERVAL = config.xiaozhi?.health_check_interval || 60000;
+const STALE_THRESHOLD = config.xiaozhi?.stale_threshold || 300000;
+const TOOLS_REFRESH_INTERVAL = config.xiaozhi?.tools_refresh_interval || 1800000;
 
 const upstreams = new Map();
 
@@ -326,6 +338,14 @@ class XiaozhiConnection {
     this.infiniteRetryCount = 0;
     this.isInSleepMode = false;
 
+    // ── 连接健康检查状态 ──────────────────────────────────
+    // lastMessageTime: 最后一次收到任何消息（含服务端 ping / pong）的时间
+    // lastToolsRefreshTime: 最后一次主动重推工具列表的时间
+    // healthCheckTimer: 定时器，周期性检测连接存活 + 重推工具
+    this.lastMessageTime = Date.now();
+    this.lastToolsRefreshTime = Date.now();
+    this.healthCheckTimer = null;
+
     // 重连参数（从全局 config 读取，所有连接共享同一套策略）
     this.reconnectDelay = cfg.reconnect_delay || 2000;
     this.reconnectMaxDelay = cfg.reconnect_max_delay || 60000;
@@ -336,6 +356,11 @@ class XiaozhiConnection {
     this.maxInfiniteRetries = cfg.max_infinite_retries || 48;
     this.sleepThreshold = cfg.sleep_threshold || 12;
     this.sleepInterval = cfg.sleep_interval || 7200000;
+
+    // 健康检查参数
+    this.healthCheckInterval = cfg.health_check_interval || 60000;
+    this.staleThreshold = cfg.stale_threshold || 300000;
+    this.toolsRefreshInterval = cfg.tools_refresh_interval || 1800000;
   }
 
   log(...args) {
@@ -481,6 +506,9 @@ class XiaozhiConnection {
   }
 
   handleIncomingMessage(raw) {
+    // 更新最后消息时间，用于连接健康检查（静默断连检测）
+    this.lastMessageTime = Date.now();
+
     let msg;
     try { msg = JSON.parse(raw.toString()); }
     catch { return; }
@@ -572,6 +600,73 @@ class XiaozhiConnection {
     this.log(`❓ 未知请求: method=${msg.method}`, JSON.stringify(msg).substring(0, 200));
   }
 
+  // ── 连接健康检查 ──────────────────────────────────────
+  // 解决"静默断连"问题：WebSocket TCP 连接在中间网络设备（NAT/代理/负载
+  // 均衡）处被静默回收时，ws 库不触发 close 事件，客户端误以为连接存活，
+  // 导致工具列表不再推送。
+  //
+  // 三重防护：
+  // 1. 静默检测：超过 staleThreshold 未收到任何消息（含服务端 ping）→ 强制重连
+  // 2. WebSocket ping：周期性发送底层 ping 帧，pong 响应更新 lastMessageTime
+  // 3. 工具重推：每隔 toolsRefreshInterval 重新通知工具列表更新
+  startHealthCheck() {
+    if (this.healthCheckTimer) return;
+    this.healthCheckTimer = setInterval(() => {
+      if (this.isClosed || !this.ws) return;
+      if (this.ws.readyState !== WebSocket.OPEN) return;
+
+      const now = Date.now();
+      const idleTime = now - this.lastMessageTime;
+
+      // 1. 静默检测：连接长时间无任何消息 → 疑似半开/僵尸连接
+      if (idleTime > this.staleThreshold) {
+        this.log(
+          `💀 连接静默 ${Math.round(idleTime / 1000)}s 超过阈值 ${Math.round(this.staleThreshold / 1000)}s，` +
+          `疑似半开连接，强制重连`
+        );
+        this.forceReconnect();
+        return;
+      }
+
+      // 2. WebSocket 底层 ping：探测 TCP 连接是否真正可用
+      try {
+        this.ws.ping();
+      } catch (e) {
+        this.log('⚠️  WebSocket ping 失败，强制重连:', maskUrl(e.message));
+        this.forceReconnect();
+        return;
+      }
+
+      // 3. 定期重推工具列表：防止小智后台丢失工具后无法恢复
+      if (now - this.lastToolsRefreshTime >= this.toolsRefreshInterval) {
+        this.lastToolsRefreshTime = now;
+        try {
+          const notification = {
+            jsonrpc: '2.0',
+            method: 'notifications/tools/list_changed',
+          };
+          this.ws.send(JSON.stringify(notification));
+          this.log('📢 周期性重新通知工具列表更新');
+        } catch (e) {
+          this.log('⚠️  周期性工具通知失败:', maskUrl(e.message));
+        }
+      }
+    }, this.healthCheckInterval);
+  }
+
+  // 强制重连：跳过 close 事件，直接清理并重新连接
+  forceReconnect() {
+    this.log('🔄 检测到连接异常，强制重连...');
+    // connect() 内部会调用 cleanupWs() 清理旧连接，
+    // removeAllListeners 确保 close 事件不会触发二次重连
+    try {
+      this.connect();
+    } catch (err) {
+      this.log('❌ 强制重连失败:', maskUrl(err.message));
+      this.scheduleReconnect();
+    }
+  }
+
   connect() {
     this.isClosed = false;
     this.cleanupWs();
@@ -588,6 +683,10 @@ class XiaozhiConnection {
       this.isInInfiniteReconnectMode = false;
       this.infiniteRetryCount = 0;
       this.isInSleepMode = false;
+
+      // 重置健康检查时间戳：连接刚建立，从零开始计时
+      this.lastMessageTime = Date.now();
+      this.lastToolsRefreshTime = Date.now();
 
       // 连接建立后必须通知工具列表更新，否则小智不会主动拉取
       try {
@@ -606,6 +705,11 @@ class XiaozhiConnection {
 
     this.ws.on('message', (raw) => this.handleIncomingMessage(raw));
 
+    // WebSocket 底层 pong 响应：确认 TCP 连接双向可达
+    this.ws.on('pong', () => {
+      this.lastMessageTime = Date.now();
+    });
+
     this.ws.on('close', () => {
       if (this.isClosed) return;
       this.isClosed = true;
@@ -616,12 +720,19 @@ class XiaozhiConnection {
     this.ws.on('error', (err) => {
       this.log('❌ WebSocket 错误:', maskUrl(err));
     });
+
+    // 启动健康检查（幂等，已启动则跳过）
+    this.startHealthCheck();
   }
 
   cleanup() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
     }
     this.isClosed = true;
     this.cleanupWs();
@@ -646,6 +757,9 @@ function buildXiaozhiConnections() {
     max_infinite_retries: MAX_INFINITE_RETRIES,
     sleep_threshold: SLEEP_THRESHOLD,
     sleep_interval: SLEEP_INTERVAL,
+    health_check_interval: HEALTH_CHECK_INTERVAL,
+    stale_threshold: STALE_THRESHOLD,
+    tools_refresh_interval: TOOLS_REFRESH_INTERVAL,
   };
 
   const connections = [];
