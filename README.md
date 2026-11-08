@@ -152,6 +152,10 @@ upstreams:
 | `upstreams.*.headers` | HTTP 请求头，支持 `${VAR}` 环境变量插值 |
 | `upstreams.*.command/args` | stdio 类型填启动命令 |
 | `upstreams.*.env` | 可选，注入到子进程的环境变量 |
+| `upstreams.*.include` | 可选，工具白名单（填上游原始工具名，不带前缀）。工具超多时必用，详见下方说明 |
+| `upstreams.*.exclude` | 可选，工具黑名单，与 `include` 二选一 |
+
+> ⚠️ **关于工具数量与 HA**：ha-mcp 新版已扩展到 77+ 个工具（约 176KB），远超小智 40KB 消息上限。若不限制，会被强制截断，且排序靠前的都是插件/区域/自动化等管理类工具，真正用于查询和控制设备的 `ha_get_state` / `ha_call_service` / `ha_search` 反而被丢弃。`config.yaml` 中 ha upstream 默认已用 `include` 只保留 10 个语音核心工具，按需增减即可。
 
 > 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接（1006）。本项目已正确实现该握手，连接可长期保持稳定。
 
