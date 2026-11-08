@@ -31,6 +31,16 @@ xiaozhi:
   # 消息队列最大长度，断开期间缓存的消息数上限（默认 100）
   # message_queue_max: 100
 
+  # ── 连接健康检查（v2.7+，解决静默断连导致工具丢失）──────
+  # 健康检查周期（ms），默认 60s
+  # health_check_interval: 60000
+  # 连接静默阈值（ms），默认 300000（5 分钟）
+  # 小智服务端每 30s 发一次 ping，超过此阈值无任何消息 = 连接已死
+  # stale_threshold: 300000
+  # 工具列表自动重推周期（ms），默认 1800000（30 分钟）
+  # 定期重新通知小智工具列表更新，防止工具丢失后无法恢复
+  # tools_refresh_interval: 1800000
+
 upstreams:
   # ── Home Assistant（空调/灯光/传感器）──────────────────
   # 完整地址在 .env 中配置：HA_MCP_URL=http://IP:PORT/TOKEN

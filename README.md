@@ -18,6 +18,7 @@
 - 🔒 **日志脱敏**：自动遮蔽 URL 中的 token，避免密钥泄露到日志
 - 🔗 **多接入支持**：一个实例同时连接多个小智 token，工具列表共享
 - 🔄 **upstream 自愈**：upstream 初始化失败后每 60 秒自动重试，无需手动 restart
+- 🩺 **连接健康检查**（v2.7+）：静默断连检测 + WebSocket ping + 工具定期自动重推，彻底解决长时间运行后工具丢失问题
 
 ## 🚀 快速开始
 
@@ -30,7 +31,7 @@ cd xiaozhi-mini
 
 ```bash
 cp .env.example .env
-# 编辑 .env，把从小智后台复制的完整 wss 链接、HA 完整地址、Tavily Key 粘贴进去
+# 编辑 .env，把从小智后台复制的完整 wss 链接、HA 完整地址、Tavily Key 粘贴进来
 # XIAOZHI_URL=wss://api.xiaozhi.me/mcp/?token=你的token
 # HA_MCP_URL=http://HA_IP:PORT/你的HA长期令牌
 # TAVILY_API_KEY=你的tavily_key
@@ -57,7 +58,7 @@ docker logs -f xiaozhi-mini
 正常启动日志：
 
 ```text
-🚀 xiaozhi-mini v2.6.0 启动中...
+🚀 xiaozhi-mini v2.7.0 启动中...
 ✅ [ha] streamable-http: 14 个工具
 ✅ [memory] stdio: 9 个工具 (PID: 16)
 ✅ [tavily] streamable-http: 5 个工具
@@ -147,6 +148,9 @@ upstreams:
 | `xiaozhi.sleep_threshold` | 进入休眠模式前的失败次数（默认 12） |
 | `xiaozhi.sleep_interval` | 休眠间隔（ms），默认 2 小时 |
 | `xiaozhi.message_queue_max` | 断线期间缓存消息数上限（默认 100） |
+| `xiaozhi.health_check_interval` | 健康检查周期（ms），默认 60000（1 分钟） |
+| `xiaozhi.stale_threshold` | 连接静默阈值（ms），默认 300000（5 分钟），超过则判定为半开连接并强制重连 |
+| `xiaozhi.tools_refresh_interval` | 工具列表自动重推周期（ms），默认 1800000（30 分钟） |
 | `upstreams.*.type` | `streamable-http` 或 `stdio` |
 | `upstreams.*.url` | HTTP 类型填端点 URL，支持 `${VAR}` 环境变量插值 |
 | `upstreams.*.headers` | HTTP 请求头，支持 `${VAR}` 环境变量插值 |
@@ -158,6 +162,11 @@ upstreams:
 > ⚠️ **关于工具数量与 HA**：ha-mcp 新版已扩展到 77+ 个工具（约 176KB），远超小智 40KB 消息上限。若不限制，会被强制截断，且排序靠前的都是插件/区域/自动化等管理类工具，真正用于查询和控制设备的 `ha_get_state` / `ha_call_service` / `ha_search` 反而被丢弃。`config.yaml` 中 ha upstream 默认已用 `include` 只保留 10 个语音核心工具，按需增减即可。
 
 > 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接（1006）。本项目已正确实现该握手，连接可长期保持稳定。
+
+> 🩺 **关于静默断连**（v2.7+）：长时间运行后，WebSocket TCP 连接可能被中间网络设备（NAT / 代理 / 负载均衡）静默回收，此时 `ws` 库不会触发 `close` 事件，客户端误以为连接存活，导致工具列表不再推送。本项目通过三重防护解决此问题：
+> 1. **静默检测**：每 60s 检查一次，若超过 5 分钟未收到任何消息（含服务端 ping），判定为半开连接并强制重连
+> 2. **WebSocket ping**：周期性发送底层 ping 帧，pong 响应确认 TCP 连接双向可达
+> 3. **工具定期重推**：每 30 分钟自动重新通知工具列表更新，即使连接存活但小智后台丢失工具也能自动恢复
 
 > ⚠️ **关于 Payload 大小**：小智云端 endpoint 对 WebSocket 消息大小有限制（约 40KB），超过会触发 1009 断连。本项目会自动截断工具描述并在接近上限时减少推送的工具数量。
 
@@ -183,8 +192,8 @@ docker compose restart
 | 内存 | ~800MB | **~110MB（默认 3 个 upstream）** |
 | 依赖 | Node + pg + pgvector + React | Node + ws + yaml |
 | 工具列表 | pg 查询 | 内存缓存，零 IO |
-| 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 |
-| 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 |
+| 保活策略 | JSON-RPC ping 响应 | JSON-RPC ping 响应 + 静默断连检测 + WS ping |
+| 重连 | 快速重连 → 无限重连 → 休眠 | 快速重连 → 无限重连 → 休眠 + 健康检查强制重连 |
 | Payload 控制 | 无 | 自动截断，40KB 上限 |
 | 多接入 | 不支持 | 一个实例连接多个小智（`xiaozhi.urls`） |
 | upstream 自愈 | 无 | 失败后每 60 秒自动重试 |
@@ -195,6 +204,7 @@ docker compose restart
 - [x] 支持多个小智 endpoint 并发（v2.5+，`xiaozhi.urls`）
 - [x] upstream 失败自动重连（v2.5+，每 60 秒自愈）
 - [x] 密钥与配置分离，完整 URL 放 `.env`（v2.6）
+- [x] 连接健康检查：静默断连检测 + 工具定期自动重推（v2.7）
 - [ ] 可选 Web UI（默认关闭，省内存）
 
 ## 📄 License
