@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.8.0';
+const VERSION = '2.8.1';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
@@ -142,16 +142,27 @@ async function parseSSEResponse(response) {
 }
 
 // ── 工具：对 streamable-http upstream 做一次 JSON-RPC POST ──
-async function postHA(up, method, params, rpcId) {
-  const res = await fetch(up.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-      ...(up.headers || {})
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: rpcId })
-  });
+// 必须带超时：否则某个 upstream（如 tavily）连接被黑洞时 fetch 永不返回，
+// 会卡死整个 initUpstreams()，导致后面再也不连接小智、工具全部丢失
+async function postHA(up, method, params, rpcId, timeoutMs = 15000) {
+  let res;
+  try {
+    res = await fetch(up.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        ...(up.headers || {})
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', method, params, id: rpcId }),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw new Error(`请求超时(${Math.round(timeoutMs / 1000)}s): ${maskUrl(up.url)}`);
+    }
+    throw err;
+  }
   return await parseSSEResponse(res);
 }
 
@@ -265,10 +276,19 @@ function startUpstreamRetry() {
 }
 
 // ── 2. 聚合工具列表（加前缀）─────────────────────────────
+//
+// 工具名路由表：exposedName -> { upstream, realName }
+// 不再靠 indexOf('_') 猜前缀，避免 upstream 名含 - 或 _ 时解析错误，
+// 同时把工具名规范化为 [A-Za-z0-9_]，兼容只接受该字符集的小智后端
+// （例如 upstream 叫 ha-climate 时，暴露为 ha_climate_xxx）
+const toolRoutes = new Map();
+
 function aggregateTools() {
   const all = [];
   const MAX_DESC_LEN = 300;
   const MAX_PAYLOAD_SIZE = config.xiaozhi?.max_payload_size || 40000;
+
+  toolRoutes.clear();
 
   for (const [name, up] of upstreams) {
     if (up.error) continue;
@@ -322,8 +342,19 @@ function aggregateTools() {
         desc = desc.substring(0, maxDescLen);
       }
 
+      // 暴露给小智的工具名：规范化为 [A-Za-z0-9_]，重名时追加序号
+      const rawName = `${name}_${t.name}`;
+      let exposedName = rawName.replace(/[^A-Za-z0-9_]/g, '_');
+      if (exposedName !== rawName) {
+        console.log(`🔤 工具名规范化: ${rawName} → ${exposedName}`);
+      }
+      let dup = 1;
+      while (toolRoutes.has(exposedName)) {
+        exposedName = `${rawName.replace(/[^A-Za-z0-9_]/g, '_')}_${dup++}`;
+      }
+
       const tool = {
-        name: `${name}_${t.name}`,
+        name: exposedName,
         description: `[${name}] ${desc}`,
         inputSchema: t.inputSchema
       };
@@ -340,6 +371,7 @@ function aggregateTools() {
       }
 
       all.push(tool);
+      toolRoutes.set(exposedName, { upstream: name, realName: t.name });
     }
   }
   return all;
@@ -577,7 +609,7 @@ class XiaozhiConnection {
       const payloadSize = JSON.stringify(payload).length;
       const breakdown = {};
       for (const t of tools) {
-        const p = t.name.substring(0, t.name.indexOf('_'));
+        const p = toolRoutes.get(t.name)?.upstream || t.name;
         breakdown[p] = (breakdown[p] || 0) + 1;
       }
       const detail = Object.entries(breakdown).map(([k, v]) => `${k}:${v}`).join(' ');
@@ -592,13 +624,24 @@ class XiaozhiConnection {
     if (msg.method === 'tools/call') {
       const toolName = msg.params?.name || '';
       this.log(`📨 收到工具调用请求: ${toolName}`, JSON.stringify(msg.params?.arguments || {}));
-      const underscoreIdx = toolName.indexOf('_');
-      if (underscoreIdx <= 0) {
-        this.wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
-        return;
+
+      // 优先查路由表（支持含 - / _ 的 upstream 名，以及规范化后的工具名）
+      let prefix;
+      let realName;
+      const route = toolRoutes.get(toolName);
+      if (route) {
+        prefix = route.upstream;
+        realName = route.realName;
+      } else {
+        // 兼容兜底：按第一个下划线拆前缀
+        const underscoreIdx = toolName.indexOf('_');
+        if (underscoreIdx <= 0) {
+          this.wsSend({ jsonrpc: '2.0', error: { code: -32602, message: `invalid tool name: ${toolName}` }, id: msg.id });
+          return;
+        }
+        prefix = toolName.substring(0, underscoreIdx);
+        realName = toolName.substring(underscoreIdx + 1);
       }
-      const prefix = toolName.substring(0, underscoreIdx);
-      const realName = toolName.substring(underscoreIdx + 1);
       const up = upstreams.get(prefix);
 
       if (!up) {
@@ -615,7 +658,8 @@ class XiaozhiConnection {
               up,
               'tools/call',
               { name: realName, arguments: msg.params.arguments || {} },
-              msg.id
+              msg.id,
+              60000
             );
             result = response.result;
           } else if (up.type === 'stdio') {
