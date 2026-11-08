@@ -256,11 +256,37 @@ function startUpstreamRetry() {
 function aggregateTools() {
   const all = [];
   const MAX_DESC_LEN = 300;
-  const MAX_PAYLOAD_SIZE = 40000;
+  const MAX_PAYLOAD_SIZE = config.xiaozhi?.max_payload_size || 40000;
 
   for (const [name, up] of upstreams) {
     if (up.error) continue;
-    for (const t of up.tools) {
+
+    // 可选的工具过滤：include（白名单，按上游原始工具名）/ exclude（黑名单）
+    // ha-mcp 新版本有 77+ 个工具（约 176KB），远超小智 40KB 上限，
+    // 必须用 include 只保留语音控制需要的核心工具，否则截断会丢掉关键工具
+    const cfg = config.upstreams?.[name] || {};
+    const include = Array.isArray(cfg.include) && cfg.include.length > 0 ? new Set(cfg.include) : null;
+    const exclude = Array.isArray(cfg.exclude) && cfg.exclude.length > 0 ? new Set(cfg.exclude) : null;
+    let tools = up.tools;
+    if (include) {
+      tools = tools.filter(t => include.has(t.name));
+      const matched = new Set(tools.map(t => t.name));
+      const missed = [...include].filter(n => !matched.has(n));
+      if (missed.length > 0) {
+        console.warn(`⚠️  [${name}] include 中这些工具在上游不存在: ${missed.join(', ')}`);
+      }
+      if (tools.length === 0) {
+        console.warn(`⚠️  [${name}] include 过滤后 0 个工具！回退为全部工具。可用工具: ${up.tools.map(t => t.name).join(', ')}`);
+        tools = up.tools;
+      }
+    } else if (exclude) {
+      tools = tools.filter(t => !exclude.has(t.name));
+    }
+    if (include || exclude) {
+      console.log(`🔍 [${name}] 工具过滤: ${tools.length}/${up.tools.length} 个`);
+    }
+
+    for (const t of tools) {
       let desc = t.description || '';
 
       if (name === 'memory') {
@@ -290,7 +316,11 @@ function aggregateTools() {
       const testPayload = { jsonrpc: '2.0', result: { tools: [...all, tool] }, id: 1 };
       const testSize = JSON.stringify(testPayload).length;
       if (testSize > MAX_PAYLOAD_SIZE) {
+        const remaining = tools.slice(tools.indexOf(t)).map(x => `${name}_${x.name}`);
+        const restUpstreams = [...upstreams.keys()].slice([...upstreams.keys()].indexOf(name) + 1);
         console.warn(`⚠️  payload 接近上限(${MAX_PAYLOAD_SIZE})，已截断到 ${all.length} 个工具`);
+        console.warn(`⚠️  被丢弃的工具: ${[...remaining, ...restUpstreams.map(u => `${u}_*`)].join(', ')}`);
+        console.warn(`💡 建议在 config.yaml 的 upstreams.${name} 下配置 include 列表，只保留需要的工具`);
         return all;
       }
 
@@ -514,7 +544,13 @@ class XiaozhiConnection {
       const tools = aggregateTools();
       const payload = { jsonrpc: '2.0', result: { tools }, id: msg.id };
       const payloadSize = JSON.stringify(payload).length;
-      this.log(`📤 推送 ${tools.length} 个工具给小智 (payload: ${Math.round(payloadSize / 1024)}KB)`);
+      const breakdown = {};
+      for (const t of tools) {
+        const p = t.name.substring(0, t.name.indexOf('_'));
+        breakdown[p] = (breakdown[p] || 0) + 1;
+      }
+      const detail = Object.entries(breakdown).map(([k, v]) => `${k}:${v}`).join(' ');
+      this.log(`📤 推送 ${tools.length} 个工具给小智 (payload: ${Math.round(payloadSize / 1024)}KB) [${detail}]`);
       if (payloadSize > 100000) {
         this.log(`⚠️  payload 过大 (${payloadSize} bytes)，可能导致连接断开`);
       }

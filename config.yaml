@@ -34,11 +34,32 @@ xiaozhi:
 upstreams:
   # ── Home Assistant（空调/灯光/传感器）──────────────────
   # 完整地址在 .env 中配置：HA_MCP_URL=http://IP:PORT/TOKEN
+  #
+  # ⚠️ 重要：ha-mcp 新版本已扩展到 77+ 个工具（约 176KB），远超小智
+  # WebSocket 40KB 消息上限。不过滤会被强制截断，且排在前面的都是
+  # 插件/区域/自动化等管理类工具，查询和控制设备的核心工具反而被丢掉
+  # （这就是"小智后台丢失几乎所有 HA 工具"的原因）。
+  # 下面的 include 白名单只保留语音控制需要的 10 个核心工具：
+  #   查设备(ha_search/ha_get_state/ha_get_entity)、控设备(ha_call_service/
+  #   ha_bulk_control/ha_get_operation_status)、查历史(ha_get_history)、
+  #   模板计算(ha_eval_template)、服务发现(ha_list_services)、总览(ha_get_overview)
+  # 如需增减，直接改这个列表（填上游原始工具名，不带 ha_ 前缀）
   ha:
     type: streamable-http
     url: "${HA_MCP_URL}"
     headers:
       Accept: "application/json, text/event-stream"
+    include:
+      - ha_search                # 按自然语言搜索实体/设备
+      - ha_get_state             # 查询设备状态
+      - ha_call_service          # 调用服务（开关灯/空调等）
+      - ha_bulk_control          # 批量控制多个设备
+      - ha_get_operation_status  # 查询批量操作结果
+      - ha_get_overview          # 全屋概览
+      - ha_get_entity            # 实体详情
+      - ha_get_history           # 历史数据查询
+      - ha_eval_template         # 模板计算（"哪个房间最热"类问题）
+      - ha_list_services         # 列出可用服务
 
   # ── 知识图谱长期记忆 ──────────────────────────────────
   memory:
