@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.6.0';
+const VERSION = '2.8.0';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
