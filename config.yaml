@@ -70,6 +70,8 @@ upstreams:
       - ha_get_history           # 历史数据查询
       - ha_eval_template         # 模板计算（"哪个房间最热"类问题）
       - ha_list_services         # 列出可用服务
+    # 工具描述截断长度，压缩描述以给工具 schema 腾出 payload 空间
+    max_desc_len: 120
 
   # ── 知识图谱长期记忆 ──────────────────────────────────
   memory:
@@ -86,6 +88,9 @@ upstreams:
     url: "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
     headers:
       Accept: "application/json, text/event-stream"
+    # 只保留语音搜索要用的一个工具，避免挤占 payload
+    include:
+      - tavily_search
 
   # ── Navidrome 音乐库（MCP 工具，绕开固件音源配置）─────────
   # 启动 navidrome-mcp-server 后，小智云端 AI 可直接调用：

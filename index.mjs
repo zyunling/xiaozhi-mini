@@ -298,6 +298,9 @@ function aggregateTools() {
       console.log(`🔍 [${name}] 工具过滤: ${tools.length}/${up.tools.length} 个`);
     }
 
+    // 每个 upstream 可单独设置描述截断长度，工具多/描述长时压缩以腾出 payload 空间
+    const maxDescLen = cfg.max_desc_len || MAX_DESC_LEN;
+
     for (const t of tools) {
       let desc = t.description || '';
 
@@ -315,8 +318,8 @@ function aggregateTools() {
         desc = memoryDescMap[t.name] || desc;
       }
 
-      if (desc.length > MAX_DESC_LEN) {
-        desc = desc.substring(0, MAX_DESC_LEN);
+      if (desc.length > maxDescLen) {
+        desc = desc.substring(0, maxDescLen);
       }
 
       const tool = {
