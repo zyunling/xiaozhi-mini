@@ -1,0 +1,56 @@
+# 更新日志
+
+本项目版本号遵循 `主版本.次版本.修订号`。所有 Release 见 [GitHub Releases](https://github.com/zyunling/xiaozhi-mini/releases)。
+
+## v2.8.1 — 2026-11-09
+
+稳定版。聚焦「HA 工具在小智后台丢失」的完整修复与 HA 2026.11+ 内置 MCP Server 适配，已在真实部署连续运行验证。
+
+### 交付内容
+
+- `index.mjs`：MCP 聚合桥主程序（v2.8.1），含工具名规范化、fetch 超时、日志脱敏增强、启动期重试、默认参数注入。
+- `config.yaml` / `.env.example`：默认配置模板，新增 HA 2026.11 内置 MCP 接入说明与 `HA_TOKEN` 占位。
+- `README.md`：新增「适配 HA 2026.11+ 内置 MCP Server」章节、v2.8.1 配置项文档、容器网络 MTU 排障提示。
+- 既有能力保持不变：双协议（streamable-http / stdio）、多接入、静默断连检测、工具定期重推、payload 控制。
+
+### 主要改动
+
+| 类别 | 改动 |
+|------|------|
+| 工具过滤 | 新增 `upstreams.*.include` / `exclude` 白黑名单，避免上游工具过多（如 ha-mcp 77+ 工具约 176KB）触发小智 40KB 上限截断 |
+| 描述压缩 | 新增 `upstreams.*.max_desc_len`，裁剪工具描述腾出 payload 空间 |
+| 工具名 | 规范化非法字符，避免工具在小智后台被静默丢弃 |
+| 网络健壮性 | 所有 fetch 加超时；新增可选 `init_retries` / `init_timeout_ms`，启动期 `tools/list` 失败短超时重试，默认行为不变 |
+| 安全性 | 日志脱敏增强：除 `token=` 外，遮蔽 query 中的 `key` / `secret` / `auth` / `password` 类参数，防止 API Key 随超时错误进入日志 |
+| 兼容性 | 新增可选 `call_defaults`，在小智完全未传参时为指定工具注入默认参数 |
+| HA 适配 | 文档化 HA 2026.11+ 内置 MCP（`/api/mcp` + Bearer 令牌 + `MCP-Protocol-Version: 2024-11-05`），含可用工具白名单示例 |
+| 文档一致性 | 修正 README 启动日志示例、config.yaml 头部注释中残留的 v2.6 / v2.7.0 版本号，统一为 v2.8.1 |
+
+### 验证结果
+
+在 HA 2026.11.0 + 小智双接入点的真实部署上连续运行超过 24 小时后验收通过：
+
+- 4 个 upstream 启动期全部一次成功：`ha` 16（过滤自 21）、`ha-climate` 3、`memory` 9、`tavily` 5。
+- 两个小智接入点各推送 **33 个工具**，payload **24KB**（低于 40KB 上限），无 `❌` / `⚠️` / `1006` / payload 截断告警。
+- HA 状态查询、开关灯、空调控制、Tavily 联网搜索的工具调用日志均为 `→ ok`。
+- 日志脱敏复查：新增脱敏规则后，日志中 0 命中完整 API Key。
+
+### 注意事项
+
+- **MTU**：若 `tools/list` 或大响应偶发挂起但宿主机直连 HA 正常，多为容器网络 MTU 与宿主机出口不一致（PVE LXC / 隧道常见出口 1480，Docker bridge 默认 1500）。需按实际出口 MTU 设置 `com.docker.network.driver.mtu`；这是部署环境配置，不写入本仓库默认值。
+- **HA 端口**：内置 MCP 地址为「实例 URL + `/api/mcp`」，端口只是实例地址的一部分，无需把 HA 改回 8123。
+- **请求头**：`Accept` 只填 `application/json`（带 `text/event-stream` 会挂起），`MCP-Protocol-Version` 必须为 `2024-11-05`。
+- **工具白名单**：内置 MCP 工具名是 `domain__Tool` 格式，不要沿用第三方 ha-mcp 插件的 `ha_*` 名单（会 0 命中并回退全量）。
+- **密钥**：若使用 v2.8.0 或更早版本且日志中出现过 `tavilyApiKey=`，建议在 Tavily 后台轮换该 Key 后更新 `.env`。
+- 所有新增配置项均有默认值或默认不启用，从旧版本升级无需修改现有 `config.yaml`。
+
+---
+
+## v2.8.0 — 2026-11-08
+
+- 合并 v2.7.0 静默断连修复，版本统一为 v2.8.0。
+- 新增 `include` / `exclude` 工具过滤、`max_desc_len` 描述压缩、工具名规范化、fetch 超时。
+
+## v2.7.0 — 2026-08-18
+
+- 连接健康检查：静默断连检测 + WebSocket ping + 工具列表定期自动重推。

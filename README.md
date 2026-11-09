@@ -15,7 +15,11 @@
 - 🔑 **环境变量插值**：配置中支持 `${VAR}` 引用 `.env` 变量，密钥不硬编码
 - 📝 **YAML 配置**：加 MCP 工具只需改 config.yaml + restart
 - 🔒 **密钥分离**：Token 独立在 `.env` 文件，避免误提交
-- 🔒 **日志脱敏**：自动遮蔽 URL 中的 token，避免密钥泄露到日志
+- 🔒 **日志脱敏**（v2.8.1 增强）：自动遮蔽 URL 中的 token 及 query 里的 key/secret/auth/password 参数
+- 🧰 **工具过滤与描述压缩**（v2.8.1）：`include` / `exclude` 白黑名单 + `max_desc_len`，解决上游工具过多导致 40KB payload 被截断
+- 🔤 **工具名规范化**（v2.8.1）：自动规范化非法字符，避免工具在小智后台被丢弃
+- ⏱️ **超时与启动期重试**（v2.8.1）：所有 fetch 加超时，上游无响应不再永久挂起；`init_retries` / `init_timeout_ms` 可选短超时重试
+- 🏠 **HA 2026.11 内置 MCP 适配**（v2.8.1）：支持 `/api/mcp` + Bearer 令牌，附完整配置示例
 - 🔗 **多接入支持**：一个实例同时连接多个小智 token，工具列表共享
 - 🔄 **upstream 自愈**：upstream 初始化失败后每 60 秒自动重试，无需手动 restart
 - 🩺 **连接健康检查**（v2.7+）：静默断连检测 + WebSocket ping + 工具定期自动重推，彻底解决长时间运行后工具丢失问题
@@ -58,7 +62,7 @@ docker logs -f xiaozhi-mini
 正常启动日志：
 
 ```text
-🚀 xiaozhi-mini v2.7.0 启动中...
+🚀 xiaozhi-mini v2.8.1 启动中...
 ✅ [ha] streamable-http: 14 个工具
 ✅ [memory] stdio: 9 个工具 (PID: 16)
 ✅ [tavily] streamable-http: 5 个工具
@@ -69,6 +73,8 @@ docker logs -f xiaozhi-mini
 [xiaozhi-1] 📢 已通知小智工具列表更新
 [xiaozhi-1] 📤 推送 28 个工具给小智 (payload: 32KB)
 ```
+
+> 工具数量与 payload 取决于 `config.yaml` 中启用的 upstream 数量与 `include` 白名单。
 
 ## ⚙️ 配置说明
 
@@ -158,8 +164,53 @@ upstreams:
 | `upstreams.*.env` | 可选，注入到子进程的环境变量 |
 | `upstreams.*.include` | 可选，工具白名单（填上游原始工具名，不带前缀）。工具超多时必用，详见下方说明 |
 | `upstreams.*.exclude` | 可选，工具黑名单，与 `include` 二选一 |
+| `upstreams.*.max_desc_len` | 可选，截断工具描述到指定字符数，给工具 schema 腾出 payload 空间 |
+| `upstreams.*.init_retries` | 可选，启动期 `tools/list` 失败时的重试次数（默认 1，即不重试） |
+| `upstreams.*.init_timeout_ms` | 可选，启动期 `tools/list` 单次超时（ms，默认 15000） |
+| `upstreams.*.call_defaults` | 可选，为指定工具注入默认调用参数；仅在小智完全未传参时生效 |
 
 > ⚠️ **关于工具数量与 HA**：ha-mcp 新版已扩展到 77+ 个工具（约 176KB），远超小智 40KB 消息上限。若不限制，会被强制截断，且排序靠前的都是插件/区域/自动化等管理类工具，真正用于查询和控制设备的 `ha_get_state` / `ha_call_service` / `ha_search` 反而被丢弃。`config.yaml` 中 ha upstream 默认已用 `include` 只保留 10 个语音核心工具，按需增减即可。
+
+### 🏠 适配 HA 2026.11+ 内置 MCP Server（v2.8.1）
+
+HA 2026.11 起自带 MCP Server，端点为 **`<HA 实例 URL>/api/mcp`**，不再需要第三方 ha-mcp 插件的 `:9583` 端口。
+端口只是实例地址的一部分（例如实例跑在 80 端口就是 `http://<HA_IP>/api/mcp`），**不需要把 HA 改回 8123**。
+
+在 `.env` 中增加长期访问令牌：
+
+```env
+HA_TOKEN=你的HA长期访问令牌
+```
+
+`config.yaml` 中把 `ha` upstream 换成（或另起一个 upstream）：
+
+```yaml
+  ha:
+    type: streamable-http
+    url: "http://<HA_IP>/api/mcp"        # 端口按你的实例地址填写
+    headers:
+      Accept: "application/json"          # ⚠️ 不要加 text/event-stream，会让 tools/list 挂起
+      Authorization: "Bearer ${HA_TOKEN}"
+      MCP-Protocol-Version: "2024-11-05" # ⚠️ 必需；缺失或用其它版本会超时
+    include:                             # 上游原始工具名（domain__Tool 格式）
+      - homeassistant__GetLiveContext
+      - intent__HassTurnOn
+      - intent__HassTurnOff
+      - intent__HassSetPosition
+      - intent__HassStopMoving
+      - climate__HassClimateSetTemperature
+      - light__HassLightSet
+      - fan__HassFanSetSpeed
+      - media_player__HassSetVolume
+      - llm__GetDateTime
+    max_desc_len: 200
+    init_retries: 3                      # 可选：启动期网络抖动防御
+    init_timeout_ms: 8000
+```
+
+> ⚠️ **不要照抄第三方 ha-mcp 插件的 `ha_*` 白名单**：内置 MCP 的工具名是 `domain__Tool` 格式，旧名单会 0 命中并回退全量，反而撑爆 payload。想知道上游有哪些工具，可直接对端点发 `tools/list`。
+
+> 🩺 **排障提示：容器网络 MTU**。若 `tools/list` 或大响应偶发挂起、但宿主机直连 HA 正常，检查容器与宿主机出口 MTU 是否一致（PVE LXC / VPN / 隧道常见出口 1480，而 Docker bridge 默认 1500，会形成 PMTU 黑洞）。可在 `docker-compose.yml` 中为网络设置 `com.docker.network.driver.mtu`，使其略小于出口 MTU。
 
 > 💡 **关于连接保活**：小智服务端通过 JSON-RPC `ping` 方法做应用层保活探测，客户端必须回复 `pong`（空 result），否则服务端 30 秒后断开连接（1006）。本项目已正确实现该握手，连接可长期保持稳定。
 
@@ -205,6 +256,8 @@ docker compose restart
 - [x] upstream 失败自动重连（v2.5+，每 60 秒自愈）
 - [x] 密钥与配置分离，完整 URL 放 `.env`（v2.6）
 - [x] 连接健康检查：静默断连检测 + 工具定期自动重推（v2.7）
+- [x] HA 工具过滤 / 描述压缩 / 工具名规范化 / fetch 超时 / 日志脱敏增强（v2.8.1）
+- [x] 适配 HA 2026.11+ 内置 MCP Server（v2.8.1）
 - [ ] 可选 Web UI（默认关闭，省内存）
 
 ## 📄 License

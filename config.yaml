@@ -1,5 +1,5 @@
 # ============================================================
-# xiaozhi-mini v2.6 配置
+# xiaozhi-mini v2.8.1 配置
 # 改完 .env 后 docker compose restart 生效
 # 所有 token/url 在 .env 文件中配置，此文件一般不用改
 # ============================================================
@@ -72,6 +72,19 @@ upstreams:
       - ha_list_services         # 列出可用服务
     # 工具描述截断长度，压缩描述以给工具 schema 腾出 payload 空间
     max_desc_len: 120
+    #
+    # ── HA 2026.11+ 内置 MCP Server ────────────────────────
+    # 新版 HA 自带 MCP，端点为 <实例URL>/api/mcp（端口按实例地址，不必改回 8123）。
+    # 若使用内置 MCP，请把上面的 url / headers / include 整段替换为：
+    #   url: "http://<HA_IP>/api/mcp"
+    #   headers:
+    #     Accept: "application/json"        # 不能带 text/event-stream
+    #     Authorization: "Bearer ${HA_TOKEN}"
+    #     MCP-Protocol-Version: "2024-11-05"
+    #   include: [homeassistant__GetLiveContext, intent__HassTurnOn, ...]
+    #   max_desc_len: 200
+    # 注意：内置 MCP 工具名是 domain__Tool 格式，不要沿用下面第三方插件的 ha_* 名单。
+    # 详见 README「适配 HA 2026.11+ 内置 MCP Server」章节。
 
   # ── 知识图谱长期记忆 ──────────────────────────────────
   memory:

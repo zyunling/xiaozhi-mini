@@ -1,5 +1,5 @@
 /**
- * xiaozhi-mini v2.6
+ * xiaozhi-mini v2.8.1
  * 轻量 MCP 聚合桥：小智 wss(MCP) ↔ N 个 upstream MCP Server
  * streamable-http: 自己 fetch + SSE 解析（避开 SDK 路径问题）
  * stdio: 仍用 SDK StdioClientTransport（路径稳定）
@@ -85,6 +85,9 @@ function maskUrl(s) {
   if (typeof s !== 'string') return String(s);
   return s
     .replace(/(token=)[^&\s"']+/gi, '$1***')
+    // 遮蔽 URL query 中的各类密钥（tavilyApiKey / api_key / secret 等），
+    // 避免 fetch 超时错误把带密钥的完整 URL 打进日志
+    .replace(/([?&][^=\s"']*(?:key|token|secret|auth|password)[^=\s"']*=)[^&\s"']+/gi, '$1***')
     .replace(/(\/mcp\/)[^?\s"']+/gi, '$1***')
     .replace(/(\/private_\/)[^?\s"']+/gi, '$1***')
     .replace(/(\/\d{3,5}\/)[A-Za-z0-9_\-]{8,}/gi, '$1***');
@@ -181,12 +184,32 @@ async function initOneUpstream(name, cfg) {
       for (const [key, value] of Object.entries(cfg.headers || {})) {
         interpolatedHeaders[key] = interpolateEnv(value);
       }
-      const listResp = await postHA(
-        { url: interpolatedUrl, headers: interpolatedHeaders },
-        'tools/list',
-        {},
-        'init-list'
-      );
+      // 可选：初始化 tools/list 失败时短超时重试（默认 1 次，保持原有行为）。
+      // HA 2026.11 内置 MCP 偶发首包挂起，配置 init_retries/init_timeout_ms 后
+      // 可在启动期快速重试，避免每次重启都等 60s 的 upstream 自愈窗口。
+      const initRetries = Math.max(1, Number(cfg.init_retries) || 1);
+      const initTimeoutMs = Number(cfg.init_timeout_ms) || 15000;
+      let listResp = null;
+      let lastErr;
+      for (let attempt = 1; attempt <= initRetries; attempt++) {
+        try {
+          listResp = await postHA(
+            { url: interpolatedUrl, headers: interpolatedHeaders },
+            'tools/list',
+            {},
+            `init-list-${attempt}`,
+            initTimeoutMs
+          );
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < initRetries) {
+            console.warn(`⚠️  [${name}] tools/list 第 ${attempt} 次失败，2s 后重试: ${maskUrl(err.message)}`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      }
+      if (!listResp) throw lastErr;
       const tools = listResp.result?.tools || [];
       upstreams.set(name, { type: 'streamable-http', url: interpolatedUrl, headers: interpolatedHeaders, tools });
       console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
@@ -649,6 +672,14 @@ class XiaozhiConnection {
         return;
       }
 
+      // 可选：为指定工具注入默认调用参数（仅在小智未传任何参数时生效）
+      // 依据：HA 2026.11 内置 MCP 的 GetLiveContext 不带过滤参数会拉全屋状态并超时
+      const userArgs = msg.params?.arguments || {};
+      const callDefaults = config.upstreams?.[prefix]?.call_defaults?.[realName];
+      const callArgs = (callDefaults && Object.keys(userArgs).length === 0)
+        ? { ...callDefaults }
+        : userArgs;
+
       // 哪个连接收到请求，就用这个连接回复（捕获 this）
       (async () => {
         try {
@@ -657,13 +688,13 @@ class XiaozhiConnection {
             const response = await postHA(
               up,
               'tools/call',
-              { name: realName, arguments: msg.params.arguments || {} },
+              { name: realName, arguments: callArgs },
               msg.id,
               60000
             );
             result = response.result;
           } else if (up.type === 'stdio') {
-            result = await up.client.callTool({ name: realName, arguments: msg.params.arguments || {} });
+            result = await up.client.callTool({ name: realName, arguments: callArgs });
           }
           this.wsSend({ jsonrpc: '2.0', result, id: msg.id });
           this.log(`🔧 ${toolName} → ok`);
