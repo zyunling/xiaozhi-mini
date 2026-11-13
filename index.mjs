@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '2.8.1';
+const VERSION = '2.8.2';
 
 // ── 工具：轻量 .env 文件解析（零依赖） ─────────────────────
 function loadEnvFile(filePath) {
@@ -169,6 +169,450 @@ async function postHA(up, method, params, rpcId, timeoutMs = 15000) {
   return await parseSSEResponse(res);
 }
 
+// ── 1.4 schema / 参数 / 结果的兼容适配（v2.8.2 候选）─────────
+//
+// 小智云端对 MCP 的支持有限，实测有三类失配：
+//  1) 不支持 anyOf 联合类型，会把数组字段序列化成字符串 "[\"media_player\"]"；
+//  2) 工具级错误用 HTTP 200 + result.isError 表达，代理若只看 HTTP 会误记 → ok；
+//  3) 实体名只能精确匹配，查 "热水器" 拿不到「热水器当前功率」传感器。
+// 以下函数只加工「推送给小智的 schema」与「转发前后的参数/结果」，
+// 不改变上游 HA 语义；所有新增行为都可用 config.yaml 开关关闭。
+
+// 把 anyOf [string, array<string>] 简化为单一 string（递归、返回深拷贝）
+function simplifyAnyOfSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(simplifyAnyOfSchema);
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (k === 'anyOf' && Array.isArray(v) && v.length === 2) {
+      const hasString = v.some(x => x && x.type === 'string');
+      const hasStringArray = v.some(x => x && x.type === 'array' &&
+        (!x.items || x.items.type === 'string'));
+      if (hasString && hasStringArray) {
+        out.type = 'string';
+        continue;
+      }
+    }
+    out[k] = simplifyAnyOfSchema(v);
+  }
+  return out;
+}
+
+// 还原被小智云端字符串化的数组参数："[\"media_player\"]" -> ["media_player"]
+function restoreStringifiedArrays(args, log) {
+  const out = { ...args };
+  for (const [k, v] of Object.entries(out)) {
+    if (typeof v !== 'string') continue;
+    const str = v.trim();
+    if (!str.startsWith('[') || !str.endsWith(']')) continue;
+    try {
+      const parsed = JSON.parse(str);
+      if (Array.isArray(parsed)) {
+        out[k] = parsed;
+        log?.(`🔄 参数还原: ${k} → ${JSON.stringify(parsed)}`);
+      }
+    } catch (e) { /* 非法 JSON 数组，原样透传 */ }
+  }
+  return out;
+}
+
+// ── 1.4b 通用工具结果体量治理 ─────────────────────────────
+//
+// 小智云端对单次工具结果有隐含上限：实测 409B / 2562B 正常回答，
+// 5832B（tavily 搜索）与 8507B（HA 全量）都出现「→ ok 但不回答」。
+// 这里对所有 streamable-http 工具结果做统一压缩，而不是给某个工具打补丁：
+//   JSON 结果 → 去掉 raw_content/images 等冗余字段 + 递归截断长字符串
+//   纯文本   → 按整行保留（不切断实体块）+ 附省略提示
+// isError 结果不处理（保留错误信息与名称候选增强）。
+// 配置 xiaozhi.max_tool_result_bytes，默认 2800；设 0 关闭。
+// 长字符串压缩：含换行时按【整行】保留，不切断实体块或段落；否则按字符截断。
+// 这样 HA 的 Live Context 不会留下半个实体，搜索结果也不会被切在句子中间。
+function compactString(s, maxStr) {
+  if (s.length <= maxStr) return s;
+  // 由记录块构成的文本（如 HA Live Context 的 "- names:" 块）按整块保留，
+  // 避免最后留下只有 names/domain、缺 state 的半个实体
+  if (s.includes('\n- names: ')) {
+    const parts = s.split(/\n(?=- names: )/);
+    const header = parts[0];
+    const blocks = parts.slice(1);
+    const kept = [];
+    let used = Buffer.byteLength(header);
+    for (const b of blocks) {
+      const size = Buffer.byteLength(b) + 1;
+      if (used + size > maxStr) break;
+      kept.push(b); used += size;
+    }
+    return header + '\n' + kept.join('\n') +
+      `\n…(共 ${blocks.length} 个实体，保留前 ${kept.length} 个)`;
+  }
+  if (s.includes('\n')) {
+    const lines = s.split('\n');
+    const kept = [];
+    let used = 0;
+    for (const l of lines) {
+      if (used + l.length + 1 > maxStr) break;
+      kept.push(l); used += l.length + 1;
+    }
+    return kept.join('\n') + `\n…(共 ${lines.length} 行，保留前 ${kept.length} 行)`;
+  }
+  return s.slice(0, maxStr) + '…';
+}
+
+// 数组首项通常最相关（搜索结果按相关度排序），给它 2 倍额度，
+// 避免为了压体积把第一条里的关键数字也截掉。
+function compactJsonValue(v, maxStr, primary = false, maxItems = 8) {
+  const cap = primary ? Math.round(maxStr * 2) : maxStr;
+  if (typeof v === 'string') return compactString(v, cap);
+  if (Array.isArray(v)) return v.slice(0, maxItems)
+    .map((x, i) => compactJsonValue(x, maxStr, i === 0, maxItems));
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) {
+      if (/^(raw_content|images|follow_up_questions|request_id|auth_mode|response_time|score|id)$/i.test(k)) continue;
+      out[k] = compactJsonValue(val, maxStr, primary, maxItems);
+    }
+    return out;
+  }
+  return v;
+}
+
+function compactToolResult(result, cfg, log) {
+  const raw = cfg?.xiaozhi?.max_tool_result_bytes;
+  const limit = (raw === 0 || raw === '0') ? 0 : Math.max(1000, Number(raw) || 2800);
+  if (limit <= 0 || !result?.content?.length) return result;
+  const items = result.content;
+  const total = items.reduce((n, c) => n + Buffer.byteLength(c.text || ''), 0);
+  if (total <= limit) return result;
+
+  const newItems = items.map(c => {
+    if (typeof c.text !== 'string') return c;
+    const t = c.text;
+    let obj = null;
+    try { obj = JSON.parse(t); } catch (e) { /* 非 JSON */ }
+    if (obj && typeof obj === 'object') {
+      let out = t;
+      // 逐级收紧「单条长度 + 结果条数」；搜索结果按相关度排序，保留前几条即可
+      for (const [maxStr, maxItems] of
+        [[1200, 3], [900, 3], [700, 3], [550, 2], [400, 2], [300, 2], [220, 2]]) {
+        out = JSON.stringify(compactJsonValue(obj, maxStr, false, maxItems));
+        if (Buffer.byteLength(out) <= limit) break;
+      }
+      return { ...c, text: out };
+    }
+    const lines = t.split('\n');
+    const kept = [];
+    let bytes = 0;
+    for (const l of lines) {
+      const b = Buffer.byteLength(l) + 1;
+      if (bytes + b > limit - 90) break;
+      kept.push(l); bytes += b;
+    }
+    return { ...c, text: kept.join('\n') +
+      `\n(结果过长已截断：共 ${lines.length} 行，保留前 ${kept.length} 行；请缩小查询范围)` };
+  });
+  const after = newItems.reduce((n, c) => n + Buffer.byteLength(c.text || ''), 0);
+  log?.(`📉 结果压缩: ${total}B → ${after}B (上限 ${limit}B)`);
+  return { ...result, content: newItems };
+}
+
+// 从 MCP CallToolResult 中提取工具级错误（HA 用 HTTP 200 + isError 表达失败）
+function toolErrorOf(result) {
+  if (!result || typeof result !== 'object') return null;
+  const text = (result.content || []).map(p => p?.text || '').join('\n');
+  if (result.isError === true) return text.slice(0, 180) || 'isError=true';
+  try {
+    const obj = JSON.parse(text);
+    if (obj && typeof obj.error === 'string') return obj.error.slice(0, 180);
+  } catch (e) { /* 非 JSON 文本，按成功处理 */ }
+  return null;
+}
+
+// ── 1.5 实体解析：把 name 精确匹配增强为包含匹配（方案 A）──────
+//
+// HA 内置 MCP 的 GetLiveContext.name 是「别名精确匹配」：查 "热水器" 只能拿到
+// 开关实体，拿不到名为「热水器当前功率」的传感器。过去靠全量 {} 顺带捞到，
+// 但全量约 9KB 会拖慢小智；把实体名枚举进提示词又不可维护。
+// 这里在代理层用 HA 的全量上下文做一次运行时实体检索：
+//   name 包含匹配 + area 包含 + domain 相等 → 只把相关实体块重拼返回。
+// 模型照旧发 {"name":"热水器"}，一次拿到开关 + 功率 + 耗电量；
+// 新增实体 / 改别名 / 换设备均自动生效，提示词无需写任何设备名。
+const entityContextCache = new Map();
+
+async function fetchEntityCatalog(up, key, cacheMs, rpcId) {
+  if (cacheMs > 0) {
+    const hit = entityContextCache.get(key);
+    if (hit && Date.now() - hit.ts < cacheMs) return hit.body;
+  }
+  const resp = await postHA(
+    up, 'tools/call',
+    { name: 'homeassistant__GetLiveContext', arguments: {} },
+    `${rpcId}-catalog`, 15000
+  );
+  const raw = (resp?.result?.content || []).map(p => p?.text || '').join('');
+  let body = raw;
+  try {
+    const obj = JSON.parse(raw);
+    body = typeof obj.result === 'string' ? obj.result : (obj.error || raw);
+  } catch (e) { /* 非 JSON，按纯文本处理 */ }
+  entityContextCache.set(key, { ts: Date.now(), body: String(body) });
+  return String(body);
+}
+
+// ── 1.5b 全屋摘要（方案 A 补充）─────────────────────────────
+//
+// 无任何过滤条件的 GetLiveContext({}) 原本返回约 9KB / 84 个实体，
+// 实测小智云端拿到后会生成不出回答（「报告全屋状态」无应答）。
+// 这里按「控制类 + 关键传感器 + 每区域上限 + 去 attributes」压到约 2~3KB，
+// 并附省略提示，引导模型按需二次查询指定房间/设备。
+// 只影响 {} 查询；带 name/area/domain 的查询完全不受影响。
+const CTRL_DOMAINS = new Set([
+  'switch', 'light', 'climate', 'fan', 'media_player',
+  'cover', 'lock', 'vacuum', 'humidifier'
+]);
+
+function stripAttributes(block) {
+  return block.split('\n').filter(l =>
+    !/^\s*attributes:/.test(l) &&
+    !/^\s+(unit_of_measurement|device_class|friendly_name):/.test(l)
+  ).join('\n').replace(/\n+$/, '');
+}
+
+// 人在/存在实体（回答「谁在家/家里有人吗」的核心依据）
+function isPresenceBlock(b) {
+  const dom = (b.match(/^\s*domain: (.*)$/m) || [])[1] || '';
+  if (/^(person|device_tracker|zone)$/.test(dom)) return true;
+  const name = (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  return /人在|occupancy|presence|有人|person|device_tracker/i.test(name);
+}
+
+// 门/窗接触（安防，也是人在的弱信号）
+function isDoorBlock(b) {
+  const name = (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  return /门|窗|Contact/i.test(name);
+}
+
+// 关键传感器（温度/功率/湿度/电量等）
+function isKeySensorBlock(b) {
+  const dom = (b.match(/^\s*domain: (.*)$/m) || [])[1] || '';
+  if (dom !== 'sensor' && dom !== 'binary_sensor') return false;
+  const cls = (b.match(/device_class: (.*)$/m) || [])[1] || '';
+  const unit = (b.match(/unit_of_measurement: (.*)$/m) || [])[1] || '';
+  const name = (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  return /temperature|power|humidity|occupancy|motion|battery|illuminance/i.test(cls) ||
+         /W|%|lx|°C|°F/i.test(unit) ||
+         /温度|功率|湿度|人在|电量|照度/.test(name);
+}
+
+// ── 1.5b 全屋摘要（方案 A 补充，v2.8.2 优化）─────────────────
+// 无任何过滤条件的 GetLiveContext({}) 原本返回约 9KB / 84 个实体，小智拿到后生成不出回答；
+// 早先版本按「控制类+关键传感器、每区域≤4」挑 33 个实体，是设备大杂烩，且人在类实体被
+// 每区域上限卡掉（如客厅已有 4 条，把「客厅人在」挤掉），导致「家里有人吗」答非所问、乱报设备。
+// 这里改为分层置顶：人在/存在 → 门禁 → 开启中的设备 → 关键传感器；人在/门禁豁免每区域上限，
+// 始终置顶；并对同名实体去重。覆盖两类查询：① 完全无参数 GetLiveContext({}) → 全屋摘要；
+// ② 只给 area、未给 name/domain（模型逐房间 fan-out 的常见形态）→ 该区域 presence 优先摘要。
+// 带 name（实体解析）或带 domain（如灯/空调）的查询不受影响。
+async function buildSummary(up, key, erCfg, cacheMs, rpcId, log, areaFilter = null) {
+  const body = await fetchEntityCatalog(up, key, cacheMs, rpcId);
+  const parts = body.split(/\n(?=- names:)/);
+  const header = parts[0] || 'Live Context:';
+  let allBlocks = parts.slice(1);
+  if (allBlocks.length === 0) return null;
+
+  // 仅给 area、未给 name/domain 时（模型逐房间 fan-out 的常见形态）：
+  // 先把该区域实体按 area 过滤，再做 presence 优先摘要，避免带回整间房的设备大杂烩
+  if (areaFilter) {
+    const af = String(areaFilter).toLowerCase();
+    allBlocks = allBlocks.filter(b => {
+      const a = (b.match(/^\s*areas?: (.*)$/m) || [])[1] || '';
+      return a.toLowerCase().includes(af);
+    });
+    if (allBlocks.length === 0) return null;
+  }
+
+  const perArea = Math.max(1, Number(erCfg.full_per_area) || 4);
+  // 单区域摘要比全屋更短，更聚焦人在/门禁，避免模型再把设备罗列一遍
+  const maxBytes = Math.max(800, Number(erCfg.full_max_bytes) || 2800) * (areaFilter ? 0.5 : 1);
+  const areaOf = b => (b.match(/^\s*areas?: (.*)$/m) || [])[1] || '未分区';
+  const stateOf = b => (b.match(/^\s*state: (.*)$/m) || [])[1] || '';
+  const domOf = b => (b.match(/^\s*domain: (.*)$/m) || [])[1] || '';
+  const nameOf = b => (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  const isOn = b => {
+    const s = stateOf(b).replace(/'/g, '');
+    return s === 'on' || s === 'playing' || s === 'open' ||
+           s === 'heat' || s === 'cool' || s === 'auto' || s === 'fan_only';
+  };
+
+  // 去重：同一实体常在目录里被拆成多条 names 块（如「凉霸」「壁灯」），按首名+域去重
+  const seen = new Set();
+  const blocks = allBlocks.filter(b => {
+    const k = nameOf(b).split(/[,，]/)[0].trim() + '|' + domOf(b);
+    if (seen.has(k)) return false; seen.add(k); return true;
+  });
+
+  const tiers = [
+    blocks.filter(isPresenceBlock),
+    blocks.filter(b => isDoorBlock(b) && !isPresenceBlock(b)),
+    blocks.filter(b => CTRL_DOMAINS.has(domOf(b)) && isOn(b) && !isPresenceBlock(b)),
+    blocks.filter(b => isKeySensorBlock(b) && !isPresenceBlock(b)),
+  ];
+
+  const per = {};
+  const picked = [];
+  for (const tier of tiers) {
+    for (const b of tier) {
+      const a = areaOf(b);
+      const exempt = isPresenceBlock(b) || isDoorBlock(b);
+      per[a] = (per[a] || 0) + 1;
+      if (exempt || per[a] <= perArea) picked.push(b);
+    }
+  }
+
+  // 字节上限兜底：优先裁剪非置顶层（控制设备/传感器）
+  let out = header + '\n' + picked.map(stripAttributes).join('\n');
+  while (out.length > maxBytes && picked.length > tiers[0].length + tiers[1].length + 2) {
+    let idx = -1;
+    for (let i = picked.length - 1; i >= 0; i--) {
+      if (!(isPresenceBlock(picked[i]) || isDoorBlock(picked[i]))) { idx = i; break; }
+    }
+    if (idx < 0) break;
+    picked.splice(idx, 1);
+    out = header + '\n' + picked.map(stripAttributes).join('\n');
+  }
+
+  const scope = areaFilter ? `（${areaFilter}）` : '全屋';
+  out += `\n(已省略 ${blocks.length - picked.length} 个次要实体；指定设备可查完整详情)`;
+  if (tiers[0].length) {
+    out += `\n注：本列表为${scope}摘要；问"谁在家/家里有人吗"应聚焦 人在/occupancy 类实体，勿复述无关设备。`;
+  }
+  const scopeLabel = areaFilter ? `摘要(${areaFilter})` : '全屋摘要';
+  log?.(`🔎 ${scopeLabel}: ${picked.length}/${blocks.length} 个实体, ${out.length}B (原始 ${body.length}B)`);
+  return { content: [{ type: 'text', text: JSON.stringify({ result: out }) }], isError: false };
+}
+
+// ── 1.5c 控制类工具的名称失配候选回传（方案 A 补充）──────────
+//
+// 口语总称常不是 HA 暴露名：说「客厅灯」，HA 里实际叫「大灯/射灯/灯带/筒灯组」，
+// 精确匹配必然报 No entities matched the name。模型随后常退化成
+// {"area":"客厅","domain":["light"]} 把整间房的灯全关掉，违反「只操作主设备」的意图。
+// 这里在工具返回名称错误时，用运行时实体目录把总称拆成「区域 + 设备词」，
+// 把匹配到的真实实体名附在错误文本里回给模型，指导它用准确 name 重试。
+// 只改错误文本；不自动重试、不主动调用任何控制工具，零误控风险。
+async function buildNameCandidates(up, key, erCfg, badName, rpcId) {
+  const cacheMs = Math.max(0, Number(erCfg.cache_ms) || 0);
+  const body = await fetchEntityCatalog(up, key, cacheMs, `${rpcId}-cand`);
+  const blocks = body.split(/\n(?=- names:)/).slice(1);
+  const nameOf = b => (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  const areaOf = b => (b.match(/^\s*areas: (.*)$/m) || [])[1] || '';
+
+  const areas = [...new Set(
+    blocks.map(areaOf).filter(Boolean)
+      .flatMap(a => a.split(/[,，]/)).map(a => a.trim()).filter(Boolean)
+  )].sort((a, b) => b.length - a.length);
+
+  let area = '', keyword = badName;
+  for (const a of areas) {
+    if (a && badName.startsWith(a) && badName.length > a.length) {
+      area = a;
+      keyword = badName.slice(a.length).trim();
+      break;
+    }
+  }
+  if (!keyword) keyword = badName;
+
+  const kw = keyword.toLowerCase();
+  const match = (b, useArea) =>
+    (!useArea || !area || areaOf(b).includes(area)) &&
+    nameOf(b).toLowerCase().includes(kw);
+  let cand = blocks.filter(b => match(b, true));
+  if (cand.length === 0 && area) cand = blocks.filter(b => match(b, false));
+  const names = [...new Set(cand.map(nameOf))].filter(Boolean).slice(0, 8);
+  return { names, area, keyword };
+}
+
+async function enhanceNameError(up, key, erCfg, result, rpcId, log) {
+  if (!erCfg || erCfg.control_hints === false) return result;
+  if (!result || result.isError !== true) return result;
+  const item = (result.content || [])[0];
+  if (!item || typeof item.text !== 'string') return result;
+  const m = item.text.match(/No entities matched the name \(given name '([^']+)'\)/);
+  if (!m) return result;
+  const bad = m[1];
+  try {
+    const { names, area, keyword } = await buildNameCandidates(up, key, erCfg, bad, rpcId);
+    if (!names.length) return result;
+    const hint = `\n\n[可用实体] ${area ? area + ' 下' : ''}与「${keyword}」匹配的实体：${names.join('、')}。` +
+      `\n可用准确的 name 操作单个设备；也可用 area+domain 操作该区域全部同类设备。` +
+      `\n具体选哪种按用户指令判断（例如「关某区域的灯」通常指全部，「开灯」按用户习惯只开主灯）。`;
+    log?.(`🔎 名称候选: "${bad}" → ${names.join(', ')}`);
+    return {
+      ...result,
+      content: [{ ...item, text: item.text + hint }, ...result.content.slice(1)]
+    };
+  } catch (e) {
+    return result;  // 目录不可用时不改变原错误
+  }
+}
+
+async function expandEntityQuery(up, key, erCfg, callArgs, rpcId, log) {
+  if (!erCfg || erCfg.enabled === false) return null;
+  const rawName = callArgs.name;
+  const kw = (typeof rawName === 'string' ? rawName
+    : Array.isArray(rawName) ? String(rawName[0] || '') : '').trim();
+  const cacheMs = Math.max(0, Number(erCfg.cache_ms) || 0);
+  const maxResults = Math.max(1, Number(erCfg.max_results) || 12);
+  const area = (typeof callArgs.area === 'string' ? callArgs.area : '').trim().toLowerCase();
+  const domRaw = callArgs.domain;
+  const domList = (Array.isArray(domRaw) ? domRaw : (domRaw ? [domRaw] : []))
+    .map(d => String(d).trim()).filter(Boolean);
+
+  // 无任何过滤条件 → 全屋摘要，避免 9KB 原文让小智生成不出回答
+  if (!kw && !area && !domList.length && erCfg.summarize_full !== false) {
+    return await buildSummary(up, key, erCfg, cacheMs, rpcId, log);
+  }
+  // 只给了 area、未给 name/domain → 该区域 presence 优先摘要
+  // （解决逐房间 fan-out 时，每个 area 查询都带回整间房设备、最终答非所问的问题）
+  if (!kw && area && !domList.length && erCfg.summarize_area !== false) {
+    return await buildSummary(up, key, erCfg, cacheMs, rpcId, log, area);
+  }
+  if (!kw) return null;  // 只有 domain 时保持上游原语义
+
+  const body = await fetchEntityCatalog(up, key, cacheMs, rpcId);
+  const parts = body.split(/\n(?=- names:)/);
+  const header = parts[0] || 'Live Context:';
+  const blocks = parts.slice(1);
+  if (blocks.length === 0) return null;
+
+  const nameOf = b => (b.match(/^- names: (.*)$/m) || [])[1] || '';
+  const areaOf = b => (b.match(/^\s*areas: (.*)$/m) || [])[1] || '';
+  const domOf = b => (b.match(/^\s*domain: (.*)$/m) || [])[1] || '';
+  const k = kw.toLowerCase();
+
+  let selected = blocks.filter(b =>
+    nameOf(b).toLowerCase().includes(k) &&
+    (!area || areaOf(b).toLowerCase().includes(area)) &&
+    (!domList.length || domList.includes(domOf(b)))
+  );
+  let note = '';
+  if (selected.length === 0 && (area || domList.length)) {
+    // 渐进放宽：小智常猜错 domain（如 water_heater），先丢 domain 再丢 area
+    selected = blocks.filter(b => nameOf(b).toLowerCase().includes(k) &&
+      (!area || areaOf(b).toLowerCase().includes(area)));
+    if (selected.length) note = '忽略无效 domain';
+    else {
+      selected = blocks.filter(b => nameOf(b).toLowerCase().includes(k));
+      if (selected.length) note = '忽略无效 domain/area';
+    }
+  }
+  if (selected.length === 0) return null;  // 完全无匹配 → 回退上游原调用
+
+  const truncated = selected.length > maxResults;
+  const picked = selected.slice(0, maxResults);
+  const out = header + '\n' + picked.join('\n');
+  log?.(`🔎 实体解析: "${kw}" → ${picked.length}/${blocks.length} 个实体, ${out.length}B` +
+        (note ? ` (${note})` : '') + (truncated ? ' [已截断]' : ''));
+  return { content: [{ type: 'text', text: JSON.stringify({ result: out }) }], isError: false };
+}
+
 // ── 1. 初始化所有 upstream ────────────────────────────────
 async function initUpstreams() {
   for (const [name, cfg] of Object.entries(config.upstreams || {})) {
@@ -213,6 +657,9 @@ async function initOneUpstream(name, cfg) {
       const tools = listResp.result?.tools || [];
       upstreams.set(name, { type: 'streamable-http', url: interpolatedUrl, headers: interpolatedHeaders, tools });
       console.log(`✅ [${name}] streamable-http: ${tools.length} 个工具`);
+      if (cfg.entity_resolve && cfg.entity_resolve.enabled !== false) {
+        console.log(`🔎 [${name}] 实体解析已启用 (max_results=${cfg.entity_resolve.max_results || 12}, cache_ms=${cfg.entity_resolve.cache_ms || 0})`);
+      }
     } else if (cfg.type === 'stdio') {
       const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
       const transportOpts = {
@@ -379,7 +826,7 @@ function aggregateTools() {
       const tool = {
         name: exposedName,
         description: `[${name}] ${desc}`,
-        inputSchema: t.inputSchema
+        inputSchema: simplifyAnyOfSchema(t.inputSchema)
       };
 
       const testPayload = { jsonrpc: '2.0', result: { tools: [...all, tool] }, id: 1 };
@@ -680,24 +1127,53 @@ class XiaozhiConnection {
         ? { ...callDefaults }
         : userArgs;
 
+      // 还原小智云端把数组参数字符串化的形态（"[...]" → [...]）
+      const finalArgs = restoreStringifiedArrays(callArgs, s => this.log(s));
+
       // 哪个连接收到请求，就用这个连接回复（捕获 this）
       (async () => {
         try {
           let result;
           if (up.type === 'streamable-http') {
-            const response = await postHA(
-              up,
-              'tools/call',
-              { name: realName, arguments: callArgs },
-              msg.id,
-              60000
-            );
-            result = response.result;
+            const erCfg = config.upstreams?.[prefix]?.entity_resolve;
+            let expanded = null;
+            if (erCfg && erCfg.enabled !== false &&
+                realName === 'homeassistant__GetLiveContext') {
+              try {
+                expanded = await expandEntityQuery(
+                  up, prefix, erCfg, finalArgs, msg.id, s => this.log(s)
+                );
+              } catch (err) {
+                this.log(`⚠️  实体解析失败，回退原调用: ${maskUrl(err.message)}`);
+              }
+            }
+            if (expanded) {
+              result = expanded;
+            } else {
+              const response = await postHA(
+                up, 'tools/call', { name: realName, arguments: finalArgs },
+                msg.id, 60000
+              );
+              result = response.result;
+              // 名称失配时把真实实体候选回给模型（只改错误文本，不自动控制）
+              const erCfgHint = config.upstreams?.[prefix]?.entity_resolve;
+              if (erCfgHint) {
+                result = await enhanceNameError(
+                  up, prefix, erCfgHint, result, msg.id, s => this.log(s)
+                );
+              }
+            }
           } else if (up.type === 'stdio') {
-            result = await up.client.callTool({ name: realName, arguments: callArgs });
+            result = await up.client.callTool({ name: realName, arguments: finalArgs });
           }
+          // 统一治理工具结果体量（错误结果保持原样）
+          if (up.type === 'streamable-http' && !result?.isError) {
+            result = compactToolResult(result, config, s => this.log(s));
+          }
+          const errText = toolErrorOf(result);
           this.wsSend({ jsonrpc: '2.0', result, id: msg.id });
-          this.log(`🔧 ${toolName} → ok`);
+          if (errText) this.log(`⚠️  ${toolName} → error: ${errText}`);
+          else this.log(`🔧 ${toolName} → ok`);
         } catch (err) {
           this.log(`❌ ${toolName} 调用失败:`, maskUrl(err));
           this.wsSend({ jsonrpc: '2.0', error: { code: -32000, message: maskUrl(err.message) }, id: msg.id });

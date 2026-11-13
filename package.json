@@ -1,6 +1,6 @@
 {
   "name": "xiaozhi-mini",
-  "version": "2.8.1",
+  "version": "2.8.2",
   "type": "module",
   "dependencies": {
     "ws": "^8.18.0",
